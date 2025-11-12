@@ -1,0 +1,32 @@
+[package]
+name = "nether-client"
+version = "1.0.0"
+description = "Minecraft Server Manager"
+authors = ["Nether Client Team"]
+license = "MIT"
+repository = ""
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.0", features = ["full"] }
+tauri = { version = "1.5", features = [ "system-tray", "window-minimize", "shell-open", "fs-all", "window-maximize", "window-hide", "dialog-all", "window-close", "notification-all", "window-unmaximize", "os-all", "path-all", "window-unminimize", "window-show", "window-start-dragging"] }
+reqwest = { version = "0.11", features = ["json"] }
+uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+sysinfo = "0.30"
+lazy_static = "1.4"
+zip = "0.6"
+base64 = "0.21"
+regex = "1.10"
+
+[features]
+# this feature is used for production builds or when `devPath` points to the filesystem
+# DO NOT REMOVE!!
+custom-protocol = ["tauri/custom-protocol"]

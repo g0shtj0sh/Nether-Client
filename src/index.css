@@ -1,0 +1,252 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-dark-300;
+    box-sizing: border-box;
+  }
+  
+  /* Styles de défilement personnalisés */
+  .scrollbar-hide {
+    scrollbar-width: none; /* Firefox */
+    -ms-overflow-style: none; /* IE et Edge */
+  }
+  
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none; /* Chrome, Safari et Opera */
+  }
+  
+  /* Barres de défilement visibles pour les conteneurs de contenu */
+  .scrollbar-visible {
+    scrollbar-width: thin; /* Firefox */
+    scrollbar-color: rgba(123, 43, 214, 0.5) transparent; /* Firefox */
+  }
+  
+  .scrollbar-visible::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  
+  .scrollbar-visible::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.1);
+    border-radius: 4px;
+  }
+  
+  .scrollbar-visible::-webkit-scrollbar-thumb {
+    background: rgba(123, 43, 214, 0.5);
+    border-radius: 4px;
+  }
+  
+  .scrollbar-visible::-webkit-scrollbar-thumb:hover {
+    background: rgba(123, 43, 214, 0.7);
+  }
+  
+  body {
+    @apply text-white font-sans;
+    background: transparent;
+    font-feature-settings: "rlig" 1, "calt" 1;
+    min-height: 100vh;
+    overflow: hidden;
+    position: relative;
+  }
+  
+  /* Cacher les barres de défilement sur tous les éléments */
+  * {
+    scrollbar-width: none; /* Firefox */
+    -ms-overflow-style: none; /* IE et Edge */
+  }
+  
+  *::-webkit-scrollbar {
+    display: none; /* Chrome, Safari et Opera */
+  }
+  
+  #root {
+    border-radius: 12px;
+    min-height: 100vh;
+    background: #0a0118;
+    background-image: 
+      linear-gradient(180deg, transparent 0%, var(--color-glow, rgba(123, 43, 214, 0.04)) 30%, var(--color-glow, rgba(157, 78, 221, 0.06)) 60%, var(--color-glow, rgba(199, 125, 255, 0.03)) 100%);
+    background-attachment: local;
+    background-repeat: no-repeat;
+    overflow: hidden;
+    -webkit-background-clip: padding-box;
+    background-clip: padding-box;
+    isolation: isolate;
+  }
+  
+
+  /* Lisibilité accrue sur fond noir avec lueur thématique */
+  h1, h2, h3 {
+    text-shadow: 0 2px 12px var(--color-glow), 0 0 2px rgba(0,0,0,0.6);
+  }
+  /* Corrige les anciennes classes text-dark-* utilisées pour du texte sur fond sombre */
+  .text-dark-400 { color: rgba(255, 255, 255, 0.75) !important; }
+  .text-dark-500 { color: rgba(255, 255, 255, 0.65) !important; }
+  .text-dark-600 { color: rgba(255, 255, 255, 0.55) !important; }
+}
+
+@layer components {
+  /* Contexte de fond dynamique adapté au thème actuel */
+  .nether-background {
+    position: relative;
+    isolation: isolate;
+    background-image:
+      /* voile assombrissant global */
+      linear-gradient(180deg, rgba(0,0,0,0.42) 0%, rgba(0,0,0,0.5) 100%),
+      /* lueur colorée subtile adaptée au thème */
+      linear-gradient(180deg, transparent 0%, var(--color-glow) 30%, var(--color-glow) 60%, var(--color-glow) 100%);
+  }
+  .btn-primary {
+    @apply text-white font-medium py-2 px-4 rounded-lg transition-all duration-300 hover:transform hover:scale-105;
+    background: linear-gradient(to right, var(--color-primary), var(--color-primary-hover));
+    box-shadow: 0 0 8px var(--color-glow);
+  }
+  
+  .btn-primary:hover {
+    filter: brightness(1.1);
+  }
+  
+  .btn-secondary {
+    @apply bg-gradient-to-r from-dark-600 to-dark-700 hover:from-dark-500 hover:to-dark-600 text-white font-medium py-2 px-4 rounded-lg transition-all duration-300 border border-dark-500 hover:border-primary-500;
+  }
+  
+  .card {
+    @apply bg-gradient-to-br from-dark-200 to-dark-300 border border-dark-400 rounded-lg p-6 backdrop-blur-sm;
+    background-image: linear-gradient(135deg, var(--color-glow) 0%, transparent 100%);
+  }
+  
+  .card-portal {
+    @apply bg-gradient-to-br from-dark-200 to-dark-300 rounded-lg p-6 backdrop-blur-sm;
+    border: 1px solid var(--color-primary);
+    background-image: linear-gradient(135deg, var(--color-glow) 0%, transparent 100%);
+  }
+  
+  .input {
+    @apply bg-dark-300 border border-dark-500 text-white rounded-lg px-3 py-2 focus:outline-none transition-all duration-300 backdrop-blur-sm;
+    background-image: linear-gradient(135deg, var(--color-glow) 0%, transparent 100%);
+  }
+  
+  .input:focus {
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 2px var(--color-glow);
+  }
+  
+  .sidebar {
+    @apply bg-gradient-to-b from-dark-100 to-dark-200 border-r border-dark-400 backdrop-blur-sm;
+    background-image: 
+      linear-gradient(180deg, var(--color-glow) 0%, transparent 100%),
+      radial-gradient(circle at top, var(--color-glow) 0%, transparent 70%);
+  }
+  
+  .nav-item {
+    @apply text-white transition-all duration-300 rounded-lg px-3 py-2 mx-2 my-1;
+    opacity: 0.7;
+  }
+  
+  .nav-item:hover {
+    background: linear-gradient(to right, var(--color-primary), var(--color-primary-hover));
+    opacity: 1;
+  }
+  
+  .nav-item.active {
+    @apply text-white;
+    background: linear-gradient(to right, var(--color-primary), var(--color-primary-hover));
+    box-shadow: 0 0 6px var(--color-glow);
+    opacity: 1;
+  }
+  
+  .logo-glow {
+    @apply animate-nether-pulse;
+    filter: drop-shadow(0 0 4px var(--color-glow));
+  }
+  
+  /* Amélioration du rendu des coins arrondis */
+  .app-container {
+    -webkit-background-clip: padding-box;
+    background-clip: padding-box;
+    isolation: isolate;
+    contain: layout style paint;
+    border-width: 1px;
+    border-style: solid;
+    box-sizing: border-box;
+    will-change: transform;
+    transform: translateZ(0);
+    backface-visibility: hidden;
+  }
+  
+  /* Amélioration du rendu des bordures lors du redimensionnement */
+  .app-container * {
+    box-sizing: border-box;
+  }
+  
+  /* Styles robustes pour les bordures */
+  .app-container {
+    border-color: rgba(168, 85, 247, 0.4) !important;
+    border-width: 1px !important;
+    border-style: solid !important;
+    border-left: 1px solid rgba(168, 85, 247, 0.4) !important;
+    border-right: 1px solid rgba(168, 85, 247, 0.4) !important;
+    border-top: 1px solid rgba(168, 85, 247, 0.4) !important;
+    border-bottom: 1px solid rgba(168, 85, 247, 0.4) !important;
+  }
+  
+  /* Force le rendu des bordures */
+  .app-container::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    border: 1px solid rgba(168, 85, 247, 0.4);
+    border-left: 1px solid rgba(168, 85, 247, 0.4) !important;
+    border-right: 1px solid rgba(168, 85, 247, 0.4) !important;
+    border-top: 1px solid rgba(168, 85, 247, 0.4) !important;
+    border-bottom: 1px solid rgba(168, 85, 247, 0.4) !important;
+    border-radius: inherit;
+    pointer-events: none;
+    z-index: -1;
+  }
+  
+  /* Bordure gauche spécifique pour assurer la visibilité */
+  .app-container::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 1px;
+    background: rgba(168, 85, 247, 0.4);
+    pointer-events: none;
+    z-index: 1;
+  }
+  
+  .nether-particles {
+    position: relative;
+    overflow: hidden;
+  }
+  
+  .nether-particles::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, var(--color-glow), transparent);
+    animation: energy-flow 3s linear infinite;
+  }
+  
+  .dashboard-card {
+    @apply bg-gradient-to-br from-dark-200 to-dark-300 border border-dark-400 rounded-lg p-4 backdrop-blur-sm;
+    background-image: linear-gradient(135deg, var(--color-glow) 0%, transparent 100%);
+    transition: all 0.3s ease;
+  }
+  
+  .dashboard-card:hover {
+    @apply transform scale-105;
+    filter: brightness(1.1);
+  }
+}
