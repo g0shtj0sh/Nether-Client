@@ -38,6 +38,8 @@ struct ServerConfig {
     max_players: u32,
     difficulty: String,
     gamemode: String,
+    #[serde(default)]
+    build: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -259,13 +261,18 @@ async fn create_forge_server(config: ServerConfig) -> Result<String, String> {
     let java_path = get_java_executable_path(&config.version).await?;
     println!("Utilisation de Java: {}", java_path);
     
+    // Vérifier que le fichier Java existe
+    if !std::path::Path::new(&java_path).exists() {
+        return Err(format!("Le fichier Java n'existe pas: {}. Veuillez installer Java ou vérifier votre installation.", java_path));
+    }
+    
     // Exécuter l'installeur Forge
     println!("Installation de Forge...");
     let install_output = Command::new(&java_path)
         .args(["-jar", "forge-installer.jar", "--installServer"])
         .current_dir(&server_path)
         .output()
-        .map_err(|e| format!("Erreur installation Forge: {}", e))?;
+        .map_err(|e| format!("Erreur installation Forge: {}. Chemin Java utilisé: {}", e, java_path))?;
     
     if !install_output.status.success() {
         return Err(format!("Installation Forge échouée: {}", 
@@ -378,13 +385,18 @@ async fn create_neoforge_server(config: ServerConfig) -> Result<String, String> 
     let java_path = get_java_executable_path(&config.version).await?;
     println!("Utilisation de Java: {}", java_path);
     
+    // Vérifier que le fichier Java existe
+    if !std::path::Path::new(&java_path).exists() {
+        return Err(format!("Le fichier Java n'existe pas: {}. Veuillez installer Java ou vérifier votre installation.", java_path));
+    }
+    
     // Exécuter l'installeur NeoForge
     println!("Installation de NeoForge...");
     let install_output = Command::new(&java_path)
         .args(["-jar", "neoforge-installer.jar", "--installServer"])
         .current_dir(&server_path)
         .output()
-        .map_err(|e| format!("Erreur installation NeoForge: {}", e))?;
+        .map_err(|e| format!("Erreur installation NeoForge: {}. Chemin Java utilisé: {}", e, java_path))?;
     
     if !install_output.status.success() {
         return Err(format!("Installation NeoForge échouée: {}", 
@@ -655,6 +667,432 @@ async fn create_mohist_server(config: ServerConfig, local_jar_path: Option<Strin
         .map_err(|e| format!("Erreur écriture BAT: {}", e))?;
     
     println!("Serveur MohistMC créé avec succès!");
+    
+    Ok(server_id)
+}
+
+// Commande pour récupérer les versions Paper depuis l'API
+#[tauri::command]
+async fn get_paper_versions() -> Result<Vec<serde_json::Value>, String> {
+    println!("Récupération des versions Paper depuis l'API...");
+    
+    let api_url = "https://api.papermc.io/v2/projects/paper";
+    
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Erreur création client HTTP: {}", e))?;
+    
+    let response = client
+        .get(api_url)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("Erreur requête API Paper: {}", e))?;
+    
+    if !response.status().is_success() {
+        let status = response.status();
+        return Err(format!("Erreur HTTP {}: {}", status, status.as_str()));
+    }
+    
+    let data: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Erreur parsing JSON: {}", e))?;
+    
+    let version_list = data["versions"]
+        .as_array()
+        .ok_or("Format de réponse invalide: 'versions' n'est pas un tableau")?;
+    
+    let mut versions_with_builds = Vec::new();
+    
+    // Limiter à 50 versions pour éviter trop de requêtes
+    for (index, version) in version_list.iter().take(50).enumerate() {
+        if let Some(version_str) = version.as_str() {
+            println!("Récupération des builds pour {} ({}/{})...", version_str, index + 1, version_list.len().min(50));
+            
+            let builds_url = format!("https://api.papermc.io/v2/projects/paper/versions/{}/builds", version_str);
+            
+            match client
+                .get(&builds_url)
+                .header("Accept", "application/json")
+                .send()
+                .await
+            {
+                Ok(builds_response) => {
+                    if builds_response.status().is_success() {
+                        if let Ok(builds_data) = builds_response.json::<serde_json::Value>().await {
+                            let builds = builds_data["builds"]
+                                .as_array()
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|b| b["build"].as_u64().map(|n| n as u32))
+                                        .collect::<Vec<u32>>()
+                                })
+                                .unwrap_or_default();
+                            
+                            let latest_build = builds.iter().max().copied().unwrap_or(1);
+                            
+                            versions_with_builds.push(serde_json::json!({
+                                "version": version_str,
+                                "builds": builds,
+                                "latestBuild": latest_build
+                            }));
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("⚠️ Erreur récupération builds pour {}: {}", version_str, e);
+                    // Ajouter quand même la version avec un build par défaut
+                    versions_with_builds.push(serde_json::json!({
+                        "version": version_str,
+                        "builds": [1],
+                        "latestBuild": 1
+                    }));
+                }
+            }
+        }
+    }
+    
+    if versions_with_builds.is_empty() {
+        return Err("Aucune version Paper trouvée".to_string());
+    }
+    
+    println!("✅ {} versions Paper récupérées", versions_with_builds.len());
+    Ok(versions_with_builds)
+}
+
+// Commande pour créer un serveur Paper
+#[tauri::command]
+async fn create_paper_server(config: ServerConfig) -> Result<String, String> {
+    use std::env;
+    use std::path::PathBuf;
+    use std::fs;
+    use std::io::Write;
+    
+    println!("Création du serveur Paper: {}", config.name);
+    
+    // Tester la connectivité réseau avant de commencer
+    test_network_connectivity().await.map_err(|e| {
+        format!("Problème de connectivité réseau: {}. Veuillez vérifier votre connexion Internet et réessayer.", e)
+    })?;
+    
+    let server_id = format!("server_{}", chrono::Utc::now().timestamp());
+    
+    // Créer le dossier du serveur
+    let app_data = env::var("APPDATA").map_err(|e| e.to_string())?;
+    let server_path = PathBuf::from(&app_data)
+        .join("NetherClient")
+        .join("Serveurs")
+        .join(&config.name);
+    
+    fs::create_dir_all(&server_path).map_err(|e| e.to_string())?;
+    println!("Dossier créé: {}", server_path.display());
+    
+    // Télécharger le JAR Paper depuis l'API PaperMC
+    let build = config.build.unwrap_or(1);
+    let paper_url = format!(
+        "https://api.papermc.io/v2/projects/paper/versions/{}/builds/{}/downloads/paper-{}-{}.jar",
+        config.version, build, config.version, build
+    );
+    
+    println!("Téléchargement de Paper {} build {}...", config.version, build);
+    println!("URL: {}", paper_url);
+    
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| e.to_string())?;
+    
+    let jar_bytes = client
+        .get(&paper_url)
+        .send()
+        .await
+        .map_err(|e| format!("Erreur téléchargement Paper: {}. Vérifiez que la version et le build existent.", e))?
+        .bytes()
+        .await
+        .map_err(|e| format!("Erreur lecture Paper: {}", e))?;
+    
+    // Sauvegarder le JAR
+    let jar_path = server_path.join("paper.jar");
+    let mut jar_file = fs::File::create(&jar_path)
+        .map_err(|e| format!("Erreur création JAR: {}", e))?;
+    jar_file.write_all(&jar_bytes)
+        .map_err(|e| format!("Erreur écriture JAR: {}", e))?;
+    
+    println!("JAR Paper téléchargé: {} octets", jar_bytes.len());
+    
+    // Créer eula.txt
+    let eula_path = server_path.join("eula.txt");
+    let mut eula_file = fs::File::create(&eula_path)
+        .map_err(|e| format!("Erreur création EULA: {}", e))?;
+    eula_file.write_all(b"eula=true\n")
+        .map_err(|e| format!("Erreur écriture EULA: {}", e))?;
+    
+    // Créer server.properties
+    let properties_content = create_server_properties(&config);
+    
+    let properties_path = server_path.join("server.properties");
+    let mut properties_file = fs::File::create(&properties_path)
+        .map_err(|e| format!("Erreur création properties: {}", e))?;
+    properties_file.write_all(properties_content.as_bytes())
+        .map_err(|e| format!("Erreur écriture properties: {}", e))?;
+    
+    // Créer bukkit.yml (configuration Bukkit)
+    let bukkit_content = "# This is the main configuration file for Bukkit.
+# As you can see, there's tons to configure. Some options may impact gameplay, so use
+# with caution, and make sure you know what each option does before configuring.
+# For a reference for any variable inside this file, check out the Bukkit wiki at
+# https://www.spigotmc.org/go/bukkit-yml
+
+settings:
+  allow-end: true
+  warn-on-overload: true
+  permissions-file: permissions.yml
+  update-folder: update
+  plugin-profiling: false
+  connection-throttle: 4000
+  query-plugins: true
+  deprecated-verbose: default
+  shutdown-message: Server closed
+  minimum-api: none
+  use-map-color-cache: true
+spawn-limits:
+  monsters: 70
+  animals: 10
+  water-animals: 5
+  water-ambient: 20
+  water-underground-creature: 5
+  axolotls: 5
+  ambient: 15
+chunk-gc:
+  period-in-ticks: 600
+ticks-per:
+  animal-spawns: 400
+  monster-spawns: 1
+  water-spawns: 1
+  water-ambient-spawns: 1
+  water-underground-creature-spawns: 1
+  axolotl-spawns: 1
+  ambient-spawns: 1
+  autosave: 6000
+aliases: now-in-commands.yml
+";
+    
+    let bukkit_path = server_path.join("bukkit.yml");
+    let mut bukkit_file = fs::File::create(&bukkit_path)
+        .map_err(|e| format!("Erreur création bukkit.yml: {}", e))?;
+    bukkit_file.write_all(bukkit_content.as_bytes())
+        .map_err(|e| format!("Erreur écriture bukkit.yml: {}", e))?;
+    
+    // Créer spigot.yml (configuration Spigot)
+    let spigot_content = "# This is the main configuration file for Spigot.
+# As you can see, there's tons to configure. Some options may impact gameplay, so use
+# with caution, and make sure you know what each option does before configuring.
+# For a reference for any variable inside this file, check out the Spigot wiki at
+# http://www.spigotmc.org/wiki/spigot-configuration/
+
+settings:
+  debug: false
+  bungeecord: false
+  player-shuffle: 0
+  user-cache-size: 1000
+  sample-count: 12
+  netty-threads: 4
+  attribute:
+    maxHealth:
+      max: 2048.0
+    movementSpeed:
+      max: 2048.0
+    attackDamage:
+      max: 2048.0
+  log-villager-deaths: true
+  log-named-deaths: true
+  moved-too-quickly-multiplier: 10.0
+  save-user-cache-on-stop-only: false
+  moved-wrongly-threshold: 0.0625
+  timeout-time: 60
+  restart-on-crash: true
+  restart-script: ./start.sh
+messages:
+  whitelist: You are not whitelisted on this server!
+  unknown-command: Unknown command. Type \"/help\" for help.
+  server-full: The server is full!
+  outdated-client: Outdated client! Please use {0}
+  outdated-server: Outdated server! I'm still on {0}
+  restart: Server is restarting
+advancements:
+  disable-saving: false
+  disabled: []
+commands:
+  tab-complete: 0
+  send-namespaced: true
+  log: true
+  spam-exclusions: []
+  replace-commands: []
+  silent-commandblock-console: false
+players:
+  disable-saving: false
+world-settings:
+  default:
+    below-zero-generation-in-existing-chunks: true
+    hanging-tick-frequency: 100
+    wither-spawn-sound-radius: 0
+    enable-zombie-pigmen-portal-spawns: true
+    arrow-despawn-rate: 1200
+    trident-despawn-rate: 1200
+    mob-spawn-range: 8
+    zombie-aggressive-towards-villager: true
+    nerf-spawner-mobs: false
+    view-distance: default
+    simulation-distance: default
+    thunder-chance: 100000
+    dragon-death-sound-radius: 0
+    merge-radius:
+      item: 2.5
+      exp: 3.0
+    item-despawn-rate: 6000
+    end-portal-sound-radius: 0
+    growth:
+      cactus-modifier: 100
+      cane-modifier: 100
+      melon-modifier: 100
+      mushroom-modifier: 100
+      pumpkin-modifier: 100
+      sapling-modifier: 100
+      beetroot-modifier: 100
+      carrot-modifier: 100
+      potato-modifier: 100
+      wheat-modifier: 100
+      netherwart-modifier: 100
+      vine-modifier: 100
+      cocoa-modifier: 100
+      bamboo-modifier: 100
+      sweetberry-modifier: 100
+      kelp-modifier: 100
+      twistingvines-modifier: 100
+      weepingvines-modifier: 100
+      cavevines-modifier: 100
+      glowberry-modifier: 100
+    entity-activation-range:
+      animals: 32
+      monsters: 32
+      raiders: 48
+      misc: 16
+      water: 16
+      villagers: 32
+      flying-monsters: 32
+      wake-up-inactive:
+        animals-max-per-tick: 4
+        animals-every: 1200
+        animals-for: 100
+        monsters-max-per-tick: 8
+        monsters-every: 400
+        monsters-for: 100
+        villagers-max-per-tick: 4
+        villagers-every: 600
+        villagers-for: 100
+        flying-monsters-max-per-tick: 8
+        flying-monsters-every: 200
+        flying-monsters-for: 100
+      villagers-work-immunity-after: 100
+      villagers-work-immunity-for: 20
+      villagers-active-for-panic: true
+      tick-inactive-villagers: true
+      ignore-spectators: false
+    seed-village: 10387312
+    seed-desert: 14357617
+    seed-igloo: 14357618
+    seed-jungle: 14357619
+    seed-swamp: 14357620
+    seed-monument: 10387313
+    seed-shipwreck: 165745295
+    seed-ocean: 14357621
+    seed-outpost: 165745296
+    seed-endcity: 10387313
+    seed-slime: 987234911
+    seed-nether: 30084232
+    seed-mansion: 10387319
+    seed-fossil: 14357921
+    seed-portal: 34222645
+    seed-stronghold: default
+    ticks-per:
+      hopper-transfer: 8
+      hopper-check: 1
+    hopper-amount: 1
+    hopper-can-load-chunks: false
+    entity-tracking-range:
+      players: 48
+      animals: 48
+      monsters: 48
+      misc: 32
+      other: 64
+    max-tnt-per-tick: 100
+    hunger:
+      jump-walk-exhaustion: 0.05
+      jump-sprint-exhaustion: 0.2
+      combat-exhaustion: 0.1
+      regen-exhaustion: 6.0
+      swim-multiplier: 0.01
+      sprint-multiplier: 0.1
+      other-multiplier: 0.0
+    max-tick-time:
+      tile: 50
+      entity: 50
+    verbose: false
+config-version: 12
+stats:
+  disable-saving: false
+  forced-stats: {}
+";
+    
+    let spigot_path = server_path.join("spigot.yml");
+    let mut spigot_file = fs::File::create(&spigot_path)
+        .map_err(|e| format!("Erreur création spigot.yml: {}", e))?;
+    spigot_file.write_all(spigot_content.as_bytes())
+        .map_err(|e| format!("Erreur écriture spigot.yml: {}", e))?;
+    
+    // Créer le dossier plugins
+    let plugins_path = server_path.join("plugins");
+    fs::create_dir_all(&plugins_path)
+        .map_err(|e| format!("Erreur création dossier plugins: {}", e))?;
+    
+    // Obtenir le chemin Java correct pour cette version Minecraft
+    let java_path = get_java_executable_path(&config.version).await?;
+    println!("Utilisation de Java: {}", java_path);
+    
+    // Créer le script de lancement avec le bon chemin Java
+    let ram_mb = config.ram;
+    let ram_gb = ram_mb / 1024;
+    let bat_content = format!(
+        "@echo off\n\
+         title Nether Client - {}\n\
+         echo Demarrage du serveur Paper {}...\n\
+         echo Utilisation de Java: {}\n\
+         echo.\n\
+         echo [INFO] Lancement du serveur...\n\
+         \"{}\" -Xmx{}G -Xms{}G -jar paper.jar nogui\n\
+         if %ERRORLEVEL% neq 0 (\n\
+             echo [ERROR] Erreur lors du demarrage du serveur (Code: %ERRORLEVEL%)\n\
+         )\n\
+         echo.\n\
+         echo [INFO] Serveur arrete. Appuyez sur une touche pour fermer...\n\
+         pause >nul\n",
+        config.name,
+        config.name,
+        java_path,
+        java_path,
+        ram_gb,
+        ram_gb / 2
+    );
+    
+    let bat_path = server_path.join("start.bat");
+    let mut bat_file = fs::File::create(&bat_path)
+        .map_err(|e| format!("Erreur création BAT: {}", e))?;
+    bat_file.write_all(bat_content.as_bytes())
+        .map_err(|e| format!("Erreur écriture BAT: {}", e))?;
+    
+    println!("Serveur Paper créé avec succès!");
     
     Ok(server_id)
 }
@@ -2402,15 +2840,37 @@ async fn select_best_java_version(minecraft_version: &str) -> Result<Option<serd
 
 // Fonction utilitaire pour obtenir le chemin Java correct pour une version Minecraft
 async fn get_java_executable_path(minecraft_version: &str) -> Result<String, String> {
+    use std::path::PathBuf;
+    
     let recommended_version = get_recommended_java_version(minecraft_version).await?;
     let java_versions = detect_java_versions().await?;
+    
+    // Fonction helper pour construire et vérifier le chemin Java
+    let build_and_check_path = |java_path_str: &str| -> Option<String> {
+        let java_path = PathBuf::from(java_path_str);
+        let java_exe = java_path.join("bin").join("java.exe");
+        
+        // Normaliser le chemin (convertir en String avec backslashes pour Windows)
+        let normalized_path = java_exe.to_string_lossy().replace('/', "\\");
+        
+        // Vérifier que le fichier existe
+        if std::path::Path::new(&normalized_path).exists() {
+            println!("✅ Chemin Java trouvé et vérifié: {}", normalized_path);
+            Some(normalized_path)
+        } else {
+            println!("❌ Chemin Java n'existe pas: {}", normalized_path);
+            None
+        }
+    };
     
     // Chercher la version exacte recommandée
     for java in &java_versions {
         if let Some(version) = java["version"].as_str() {
             if version.starts_with(&recommended_version) {
                 if let Some(path) = java["path"].as_str() {
-                    return Ok(format!("{}\\bin\\java.exe", path));
+                    if let Some(valid_path) = build_and_check_path(path) {
+                        return Ok(valid_path);
+                    }
                 }
             }
         }
@@ -2423,7 +2883,9 @@ async fn get_java_executable_path(minecraft_version: &str) -> Result<String, Str
             if let Ok(version_major) = version.split('.').next().unwrap_or("0").parse::<i32>() {
                 if version_major >= recommended_major {
                     if let Some(path) = java["path"].as_str() {
-                        return Ok(format!("{}\\bin\\java.exe", path));
+                        if let Some(valid_path) = build_and_check_path(path) {
+                            return Ok(valid_path);
+                        }
                     }
                 }
             }
@@ -2431,13 +2893,16 @@ async fn get_java_executable_path(minecraft_version: &str) -> Result<String, Str
     }
     
     // Si toujours pas trouvé, prendre la version la plus récente
-    if !java_versions.is_empty() {
-        if let Some(path) = java_versions[0]["path"].as_str() {
-            return Ok(format!("{}\\bin\\java.exe", path));
+    for java in &java_versions {
+        if let Some(path) = java["path"].as_str() {
+            if let Some(valid_path) = build_and_check_path(path) {
+                return Ok(valid_path);
+            }
         }
     }
     
-    // Fallback sur java système
+    // Fallback sur java système (dans le PATH)
+    println!("⚠️ Aucun chemin Java valide trouvé, utilisation de 'java' depuis le PATH");
     Ok("java".to_string())
 }
 
@@ -3690,6 +4155,314 @@ async fn uninstall_modpack(server_name: String) -> Result<(), String> {
     Ok(())
 }
 
+// Fonction interne pour détecter la version d'un serveur (utilisée par scan_servers_directory et detect_server_version)
+fn detect_version_internal(path: &std::path::PathBuf) -> String {
+    use std::fs;
+    use std::io::{BufRead, BufReader};
+    
+    let mut version = String::new();
+    
+    // ========== MÉTHODE 1: Détection depuis le nom du JAR ==========
+    let jar_files: Vec<_> = fs::read_dir(path)
+        .ok()
+        .and_then(|entries| {
+            Some(entries.filter_map(|e| e.ok())
+                .filter(|e| {
+                    let name = e.file_name().to_string_lossy().to_lowercase();
+                    name.ends_with(".jar")
+                })
+                .collect())
+        })
+        .unwrap_or_default();
+    
+    for jar_file in &jar_files {
+        let jar_name = jar_file.file_name().to_string_lossy().to_string();
+        let jar_name_lower = jar_name.to_lowercase();
+        
+        // Vanilla: server-1.20.1.jar, minecraft_server.1.20.1.jar
+        if jar_name_lower.contains("server-") || jar_name_lower.contains("minecraft_server") {
+            if jar_name_lower.contains("server-") {
+                let parts: Vec<&str> = jar_name.split("server-").collect();
+                if parts.len() > 1 {
+                    let version_part = parts[1].replace(".jar", "");
+                    if version_part.matches('.').count() >= 1 && version_part.chars().any(|c| c.is_ascii_digit()) {
+                        version = version_part;
+                        break;
+                    }
+                }
+            } else if jar_name_lower.contains("minecraft_server") {
+                let parts: Vec<&str> = jar_name.split("minecraft_server.").collect();
+                if parts.len() > 1 {
+                    let version_part = parts[1].replace(".jar", "");
+                    if version_part.matches('.').count() >= 1 && version_part.chars().any(|c| c.is_ascii_digit()) {
+                        version = version_part;
+                        break;
+                    }
+                }
+            }
+        }
+        // Paper: paper-1.20.1-123.jar, paper.jar
+        else if jar_name_lower.contains("paper-") || jar_name_lower == "paper.jar" {
+            if jar_name_lower.contains("paper-") {
+                let parts: Vec<&str> = jar_name.split("paper-").collect();
+                if parts.len() > 1 {
+                    let version_part = parts[1].replace(".jar", "");
+                    if let Some(dash_pos) = version_part.rfind('-') {
+                        let potential_version = &version_part[..dash_pos];
+                        if potential_version.matches('.').count() >= 1 {
+                            version = potential_version.to_string();
+                            break;
+                        }
+                    } else if version_part.matches('.').count() >= 1 {
+                        version = version_part;
+                        break;
+                    }
+                }
+            }
+        }
+        // Spigot: spigot-1.20.1.jar, spigot.jar
+        else if jar_name_lower.contains("spigot-") || jar_name_lower == "spigot.jar" {
+            if jar_name_lower.contains("spigot-") {
+                let parts: Vec<&str> = jar_name.split("spigot-").collect();
+                if parts.len() > 1 {
+                    let version_part = parts[1].replace(".jar", "");
+                    if version_part.matches('.').count() >= 1 {
+                        version = version_part;
+                        break;
+                    }
+                }
+            }
+        }
+        // Forge: forge-1.20.1-47.1.0.jar, forge-1.20.1-47.1.0-universal.jar, ou forge-17.0.13.jar
+        else if jar_name_lower.contains("forge-") {
+            let parts: Vec<&str> = jar_name.split("forge-").collect();
+            if parts.len() > 1 {
+                let version_part = parts[1].replace(".jar", "").replace("-universal", "");
+                if version_part.starts_with("1.") || version_part.starts_with("0.") {
+                    if let Some(dash_pos) = version_part.find('-') {
+                        let potential_version = &version_part[..dash_pos];
+                        if potential_version.matches('.').count() >= 1 {
+                            version = potential_version.to_string();
+                            break;
+                        }
+                    } else if version_part.matches('.').count() >= 1 {
+                        version = version_part;
+                        break;
+                    }
+                }
+            }
+        }
+        // NeoForge: neoforge-1.20.1-47.1.0.jar
+        else if jar_name_lower.contains("neoforge-") {
+            let parts: Vec<&str> = jar_name.split("neoforge-").collect();
+            if parts.len() > 1 {
+                let version_part = parts[1].replace(".jar", "").replace("-universal", "");
+                if let Some(dash_pos) = version_part.find('-') {
+                    let potential_version = &version_part[..dash_pos];
+                    if potential_version.matches('.').count() >= 1 {
+                        version = potential_version.to_string();
+                        break;
+                    }
+                } else if version_part.matches('.').count() >= 1 {
+                    version = version_part;
+                    break;
+                }
+            }
+        }
+        // Mohist: mohist-1.20.1-xxx.jar
+        else if jar_name_lower.contains("mohist-") {
+            let parts: Vec<&str> = jar_name.split("mohist-").collect();
+            if parts.len() > 1 {
+                let version_part = parts[1].replace(".jar", "");
+                if let Some(dash_pos) = version_part.find('-') {
+                    let potential_version = &version_part[..dash_pos];
+                    if potential_version.matches('.').count() >= 1 {
+                        version = potential_version.to_string();
+                        break;
+                    }
+                } else if version_part.matches('.').count() >= 1 {
+                    version = version_part;
+                    break;
+                }
+            }
+        }
+    }
+    
+    // ========== MÉTHODE 2: Détection depuis version.json ==========
+    if version.is_empty() {
+        let version_file = path.join("version.json");
+        if version_file.exists() {
+            if let Ok(content) = fs::read_to_string(&version_file) {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(v) = json["id"].as_str() {
+                        if v.starts_with("1.") || v.starts_with("0.") {
+                            version = v.to_string();
+                        }
+                    } else if let Some(v) = json["version"].as_str() {
+                        if v.starts_with("1.") || v.starts_with("0.") {
+                            version = v.to_string();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // ========== MÉTHODE 3: Détection depuis les logs ==========
+    if version.is_empty() {
+        let logs_path = path.join("logs");
+        let latest_log = logs_path.join("latest.log");
+        
+        if latest_log.exists() {
+            if let Ok(file) = fs::File::open(&latest_log) {
+                let reader = BufReader::new(file);
+                for (index, line) in reader.lines().enumerate() {
+                    if index > 100 { break; }
+                    
+                    if let Ok(line) = line {
+                        let line_lower = line.to_lowercase();
+                        
+                        // Pattern 1: "MC: 1.20.1"
+                        if line_lower.contains("mc:") {
+                            if let Some(mc_pos) = line_lower.find("mc:") {
+                                let after_mc = &line[mc_pos + 3..];
+                                let words: Vec<&str> = after_mc.split_whitespace().collect();
+                                if let Some(first_word) = words.first() {
+                                    let potential_version = first_word.trim_matches(|c: char| !c.is_alphanumeric() && c != '.');
+                                    if potential_version.matches('.').count() >= 1 && potential_version.starts_with("1.") {
+                                        version = potential_version.to_string();
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Pattern 2: "Starting minecraft server version X.Y.Z"
+                        if version.is_empty() && line_lower.contains("starting") && line_lower.contains("version") {
+                            let words: Vec<&str> = line.split_whitespace().collect();
+                            for (i, word) in words.iter().enumerate() {
+                                if word.to_lowercase() == "version" && i + 1 < words.len() {
+                                    let potential_version = words[i + 1].trim_matches(|c: char| !c.is_alphanumeric() && c != '.');
+                                    if potential_version.matches('.').count() >= 1 && potential_version.starts_with("1.") {
+                                        version = potential_version.to_string();
+                                        break;
+                                    }
+                                }
+                            }
+                            if !version.is_empty() { break; }
+                        }
+                        
+                        // Pattern 3: "Minecraft X.Y.Z"
+                        if version.is_empty() && line_lower.contains("minecraft") && !line_lower.contains("server") {
+                            let words: Vec<&str> = line.split_whitespace().collect();
+                            for (i, word) in words.iter().enumerate() {
+                                if word.to_lowercase() == "minecraft" && i + 1 < words.len() {
+                                    let next_word = words[i + 1];
+                                    let potential_version = next_word.trim_matches(|c: char| !c.is_alphanumeric() && c != '.');
+                                    if potential_version.matches('.').count() >= 1 && potential_version.starts_with("1.") {
+                                        version = potential_version.to_string();
+                                        break;
+                                    }
+                                }
+                            }
+                            if !version.is_empty() { break; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // ========== MÉTHODE 4: Détection depuis server.properties ==========
+    if version.is_empty() {
+        let properties_file = path.join("server.properties");
+        if properties_file.exists() {
+            if let Ok(content) = fs::read_to_string(&properties_file) {
+                for line in content.lines() {
+                    let line_lower = line.to_lowercase();
+                    if line_lower.contains("version") || line_lower.contains("minecraft") {
+                        let words: Vec<&str> = line.split_whitespace().collect();
+                        for word in words {
+                            if word.matches('.').count() >= 1 {
+                                let cleaned = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '.');
+                                if cleaned.matches('.').count() >= 1 && cleaned.starts_with("1.") {
+                                    version = cleaned.to_string();
+                                    break;
+                                }
+                            }
+                        }
+                        if !version.is_empty() { break; }
+                    }
+                }
+            }
+        }
+    }
+    
+    // ========== MÉTHODE 5: Détection générique depuis n'importe quel JAR ==========
+    if version.is_empty() && !jar_files.is_empty() {
+        for jar_file in &jar_files {
+            let jar_name = jar_file.file_name().to_string_lossy().to_string();
+            let chars: Vec<char> = jar_name.chars().collect();
+            let mut i = 0;
+            let mut current_version = String::new();
+            let mut in_version = false;
+            let mut digit_count = 0;
+            
+            while i < chars.len() {
+                let ch = chars[i];
+                if ch.is_ascii_digit() {
+                    if !in_version {
+                        in_version = true;
+                        current_version.clear();
+                        digit_count = 0;
+                    }
+                    current_version.push(ch);
+                    digit_count += 1;
+                } else if ch == '.' && in_version {
+                    current_version.push(ch);
+                } else if in_version {
+                    if current_version.matches('.').count() >= 1 && digit_count >= 2 {
+                        if current_version.starts_with("1.") || current_version.starts_with("0.") {
+                            version = current_version.trim_end_matches('.').to_string();
+                            break;
+                        }
+                    }
+                    in_version = false;
+                    current_version.clear();
+                    digit_count = 0;
+                }
+                i += 1;
+            }
+            
+            if in_version && current_version.matches('.').count() >= 1 && digit_count >= 2 {
+                if current_version.starts_with("1.") || current_version.starts_with("0.") {
+                    version = current_version.trim_end_matches('.').to_string();
+                    break;
+                }
+            }
+            
+            if !version.is_empty() {
+                break;
+            }
+        }
+    }
+    
+    // Nettoyer la version
+    if !version.is_empty() {
+        version = version.trim().to_string();
+        version = version.chars()
+            .filter(|c| c.is_ascii_digit() || *c == '.')
+            .collect::<String>();
+        
+        let parts: Vec<&str> = version.split('.').collect();
+        if parts.len() < 2 || parts.iter().any(|p| p.is_empty()) {
+            version.clear();
+        }
+    }
+    
+    version
+}
+
 // Scanner le dossier des serveurs pour détecter les serveurs importés manuellement
 #[tauri::command]
 async fn scan_servers_directory() -> Result<Vec<serde_json::Value>, String> {
@@ -3722,7 +4495,6 @@ async fn scan_servers_directory() -> Result<Vec<serde_json::Value>, String> {
             if properties_file.exists() {
                 // Lire les propriétés de base
                 let mut port = 25565;
-                let mut version = "Unknown".to_string();
                 let mut server_type = "vanilla".to_string();
                 
                 if let Ok(content) = fs::read_to_string(&properties_file) {
@@ -3738,7 +4510,14 @@ async fn scan_servers_directory() -> Result<Vec<serde_json::Value>, String> {
                 }
                 
                 // Détecter le type de serveur
-                if path.join("mods").exists() {
+                // Vérifier d'abord Paper/Spigot (détection par fichiers de configuration)
+                if path.join("paper.jar").exists() || path.join("spigot.jar").exists() || 
+                   path.join("bukkit.yml").exists() || path.join("spigot.yml").exists() ||
+                   (path.join("plugins").exists() && !path.join("mods").exists()) {
+                    server_type = "paper".to_string();
+                }
+                // Vérifier ensuite les mods
+                else if path.join("mods").exists() {
                     let mut found_neoforge = false;
                     let mut found_forge = false;
                     let mut found_mohist = false;
@@ -3769,38 +4548,15 @@ async fn scan_servers_directory() -> Result<Vec<serde_json::Value>, String> {
                     }
                 }
                 
-                // Essayer de détecter la version depuis le JAR
-                let jar_files: Vec<_> = fs::read_dir(&path)
-                    .ok()
-                    .and_then(|entries| {
-                        Some(entries.filter_map(|e| e.ok())
-                            .filter(|e| {
-                                let name = e.file_name().to_string_lossy().to_lowercase();
-                                name.ends_with(".jar") && !name.contains("forge") && !name.contains("neoforge") && !name.contains("mohist")
-                            })
-                            .collect())
-                    })
-                    .unwrap_or_default();
-                
-                if let Some(jar_file) = jar_files.first() {
-                    let jar_name = jar_file.file_name().to_string_lossy().to_string();
-                    // Extraire la version du nom du JAR si possible (ex: server-1.20.1.jar)
-                    if jar_name.contains("server-") {
-                        let parts: Vec<&str> = jar_name.split("server-").collect();
-                        if parts.len() > 1 {
-                            let version_part = parts[1].replace(".jar", "");
-                            if !version_part.is_empty() {
-                                version = version_part;
-                            }
-                        }
-                    }
-                }
+                // Utiliser la fonction robuste de détection pour tous les serveurs
+                let detected_version = detect_version_internal(&path);
+                let final_version = if detected_version.is_empty() { "Unknown".to_string() } else { detected_version };
                 
                 detected_servers.push(serde_json::json!({
                     "name": server_name,
                     "path": path.to_string_lossy().to_string(),
                     "port": port,
-                    "version": version,
+                    "version": final_version,
                     "type": server_type
                 }));
             }
@@ -3808,6 +4564,28 @@ async fn scan_servers_directory() -> Result<Vec<serde_json::Value>, String> {
     }
     
     Ok(detected_servers)
+}
+
+// Commande pour détecter la version d'un serveur existant (version robuste)
+#[tauri::command]
+async fn detect_server_version(server_path: String) -> Result<String, String> {
+    use std::path::PathBuf;
+    
+    let path = PathBuf::from(&server_path);
+    
+    if !path.exists() {
+        return Err("Le chemin du serveur n'existe pas".to_string());
+    }
+    
+    let version = detect_version_internal(&path);
+    
+    if version.is_empty() {
+        println!("⚠️ Version non détectée pour: {}", server_path);
+        return Ok("Unknown".to_string());
+    }
+    
+    println!("✅ Version détectée: {} pour {}", version, server_path);
+    Ok(version)
 }
 
 // ========== GESTION DES JOUEURS (MODERATION) ==========
@@ -3932,6 +4710,47 @@ async fn get_server_players(server_path: String) -> Result<Vec<Player>, String> 
                     is_banned: false,
                     is_whitelisted: true,
                 });
+        }
+    }
+    
+    // ========== AJOUTER TOUS LES JOUEURS DEPUIS usercache.json ==========
+    // usercache.json contient tous les joueurs qui ont déjà connecté au serveur
+    let usercache_file = path.join("usercache.json");
+    if usercache_file.exists() {
+        if let Ok(content) = fs::read_to_string(&usercache_file) {
+            if let Ok(users) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+                for user in users {
+                    if let (Some(name), Some(uuid)) = (user["name"].as_str(), user["uuid"].as_str()) {
+                        // Vérifier si le joueur existe déjà dans la map
+                        if !player_map.contains_key(uuid) {
+                            // Vérifier si le joueur est banni, whitelisté ou OP (par nom d'utilisateur)
+                            let is_banned = player_map.values()
+                                .any(|p| p.username == name && p.is_banned);
+                            let is_whitelisted = player_map.values()
+                                .any(|p| p.username == name && p.is_whitelisted);
+                            let is_op = player_map.values()
+                                .any(|p| p.username == name && p.is_op);
+                            
+                            // Ajouter le joueur s'il n'existe pas encore
+                            player_map.insert(uuid.to_string(), Player {
+                                username: name.to_string(),
+                                uuid: uuid.to_string(),
+                                is_online: false, // Sera mis à jour plus tard
+                                is_op,
+                                is_banned,
+                                is_whitelisted,
+                            });
+                        } else {
+                            // Si le joueur existe déjà, mettre à jour le nom d'utilisateur si nécessaire
+                            if let Some(player) = player_map.get_mut(uuid) {
+                                if player.username != name {
+                                    player.username = name.to_string();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     
@@ -4265,6 +5084,7 @@ fn main() {
             create_forge_server,
             create_neoforge_server,
             create_mohist_server,
+            create_paper_server,
             start_server,
             stop_server,
             get_server_status,
@@ -4305,6 +5125,7 @@ fn main() {
             update_server,
             download_minecraft_version,
             get_minecraft_versions,
+            get_paper_versions,
             check_java_installation,
             open_folder,
             send_notification,
@@ -4329,6 +5150,7 @@ fn main() {
             add_mod_from_bytes,
             get_server_players,
             scan_servers_directory,
+            detect_server_version,
             ban_player,
             unban_player,
             kick_player,
