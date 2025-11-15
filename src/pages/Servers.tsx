@@ -19,13 +19,14 @@ import JavaBuilder from '../components/builders/JavaBuilder';
 import ForgeBuilder from '../components/builders/ForgeBuilder';
 import NeoForgeBuilder from '../components/builders/NeoForgeBuilder';
 import MohistBuilder from '../components/builders/MohistBuilder';
+import PaperBuilder from '../components/builders/PaperBuilder';
 import ServerEditModal from '../components/ServerEditModal';
 import { useLanguage } from '../contexts/LanguageContext';
 
 const Servers: React.FC = () => {
   const { t } = useLanguage();
   const [servers, setServers] = useState<ServerType[]>([]);
-  const [showBuilder, setShowBuilder] = useState<'java' | 'forge' | 'neoforge' | 'mohist' | null>(null);
+  const [showBuilder, setShowBuilder] = useState<'java' | 'forge' | 'neoforge' | 'mohist' | 'paper' | null>(null);
   const [selectedServer, setSelectedServer] = useState<ServerType | null>(null);
   const [showEditModal, setShowEditModal] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
@@ -33,7 +34,47 @@ const Servers: React.FC = () => {
   useEffect(() => {
     const savedServers = localStorage.getItem('nether-client-servers');
     if (savedServers) {
-      setServers(JSON.parse(savedServers));
+      const parsedServers = JSON.parse(savedServers);
+      setServers(parsedServers);
+      
+      // Détecter automatiquement les versions pour les serveurs avec "Unknown"
+      const detectVersionsOnLoad = async () => {
+        const { invoke } = await import('@tauri-apps/api/tauri');
+        
+        const updatedServers = await Promise.all(
+          parsedServers.map(async (server: ServerType) => {
+            // Si la version est "Unknown" ou vide, essayer de la détecter
+            if (!server.version || server.version === 'Unknown' || server.version === '') {
+              try {
+                const detectedVersion = await invoke<string>('detect_server_version', {
+                  serverPath: server.path
+                });
+                
+                if (detectedVersion && detectedVersion !== 'Unknown' && detectedVersion !== '') {
+                  console.log(`✅ Version détectée pour ${server.name}: ${detectedVersion}`);
+                  return { ...server, version: detectedVersion };
+                }
+              } catch (error) {
+                console.warn(`⚠️ Impossible de détecter la version pour ${server.name}:`, error);
+              }
+            }
+            return server;
+          })
+        );
+        
+        // Vérifier si des versions ont été détectées
+        const hasChanges = updatedServers.some((server, index) => 
+          server.version !== parsedServers[index].version
+        );
+        
+        if (hasChanges) {
+          setServers(updatedServers);
+          localStorage.setItem('nether-client-servers', JSON.stringify(updatedServers));
+        }
+      };
+      
+      // Détecter les versions immédiatement (pas besoin d'attendre)
+      detectVersionsOnLoad();
     }
   }, []);
 
@@ -199,6 +240,45 @@ const Servers: React.FC = () => {
       // Obtenir les chemins des serveurs existants
       const existingPaths = new Set(servers.map(s => s.path.toLowerCase()));
       
+      // Mettre à jour les versions des serveurs existants
+      const updatedServers = await Promise.all(servers.map(async (server) => {
+        // Toujours essayer de détecter la version si elle est "Unknown" ou vide
+        if (!server.version || server.version === 'Unknown' || server.version === '') {
+          try {
+            console.log(`🔍 Détection de version pour ${server.name} (${server.path})...`);
+            const detectedVersion = await invoke<string>('detect_server_version', {
+              serverPath: server.path
+            });
+            
+            if (detectedVersion && detectedVersion !== 'Unknown' && detectedVersion !== '') {
+              console.log(`✅ Version détectée pour ${server.name}: ${detectedVersion}`);
+              return { ...server, version: detectedVersion };
+            } else {
+              console.warn(`⚠️ Version vide ou invalide pour ${server.name}:`, detectedVersion);
+            }
+          } catch (error: any) {
+            console.error(`❌ Erreur détection version pour ${server.name}:`, error);
+            // Ne pas bloquer, continuer avec la version actuelle
+          }
+        } else {
+          // Si la version est déjà connue, vérifier quand même si elle a changé (optionnel)
+          try {
+            const detectedVersion = await invoke<string>('detect_server_version', {
+              serverPath: server.path
+            });
+            
+            if (detectedVersion && detectedVersion !== 'Unknown' && detectedVersion !== server.version) {
+              console.log(`🔄 Version mise à jour pour ${server.name}: ${server.version} → ${detectedVersion}`);
+              return { ...server, version: detectedVersion };
+            }
+          } catch (error) {
+            // Si la détection échoue, garder la version actuelle
+            console.warn(`⚠️ Impossible de vérifier la version pour ${server.name}:`, error);
+          }
+        }
+        return server;
+      }));
+      
       // Filtrer les nouveaux serveurs
       const newServers: ServerType[] = detectedServers
         .filter((detected: any) => !existingPaths.has(detected.path.toLowerCase()))
@@ -208,7 +288,7 @@ const Servers: React.FC = () => {
             id: `server-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
             name: detected.name,
             version: detected.version || 'Unknown',
-            type: (detected.type || 'vanilla') as 'vanilla' | 'forge' | 'neoforge' | 'mohist',
+            type: (detected.type || 'vanilla') as 'vanilla' | 'forge' | 'neoforge' | 'mohist' | 'paper',
             port: detected.port || 25565,
             ram: 2048, // Valeur par défaut
             motd: 'A Minecraft Server',
@@ -227,11 +307,14 @@ const Servers: React.FC = () => {
         });
       
       if (newServers.length > 0) {
-        const updatedServers = [...servers, ...newServers];
-        setServers(updatedServers);
-        localStorage.setItem('nether-client-servers', JSON.stringify(updatedServers));
+        const allServers = [...updatedServers, ...newServers];
+        setServers(allServers);
+        localStorage.setItem('nether-client-servers', JSON.stringify(allServers));
         alert(`✅ ${t.servers.newServersFound} (${newServers.length})`);
       } else {
+        // Mettre à jour même s'il n'y a pas de nouveaux serveurs (pour les versions)
+        setServers(updatedServers);
+        localStorage.setItem('nether-client-servers', JSON.stringify(updatedServers));
         alert(t.servers.noNewServers);
       }
     } catch (error) {
@@ -270,6 +353,7 @@ const Servers: React.FC = () => {
       case 'forge': return 'bg-orange-500/20 text-orange-400';
       case 'neoforge': return 'bg-purple-500/20 text-purple-400';
       case 'mohist': return 'bg-purple-500/20 text-purple-400';
+      case 'paper': return 'bg-purple-500/20 text-purple-400';
       default: return 'bg-gray-500/20 text-gray-400';
     }
   };
@@ -335,6 +419,16 @@ const Servers: React.FC = () => {
         >
           <Plus className="w-4 h-4" />
           <span>{t.servers.mohistServer}</span>
+        </motion.button>
+
+        <motion.button
+          onClick={() => setShowBuilder('paper')}
+          className="btn-primary flex items-center space-x-2"
+          whileHover={{ scale: 1.05 }}
+          whileTap={{ scale: 0.95 }}
+        >
+          <Plus className="w-4 h-4" />
+          <span>Serveur Paper</span>
         </motion.button>
       </div>
 
@@ -543,6 +637,17 @@ const Servers: React.FC = () => {
 
         {showBuilder === 'mohist' && (
           <MohistBuilder 
+            onClose={() => setShowBuilder(null)}
+            onServerCreated={(server) => {
+              setServers(prev => [...prev, server]);
+              localStorage.setItem('nether-client-servers', JSON.stringify([...servers, server]));
+              setShowBuilder(null);
+            }}
+          />
+        )}
+
+        {showBuilder === 'paper' && (
+          <PaperBuilder 
             onClose={() => setShowBuilder(null)}
             onServerCreated={(server) => {
               setServers(prev => [...prev, server]);

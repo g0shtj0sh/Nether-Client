@@ -33,6 +33,13 @@ export const API_CONFIG = {
     }
   },
   
+  // PaperMC
+  paper: {
+    baseUrl: 'https://api.papermc.io',
+    apiUrl: 'https://api.papermc.io/v2/projects/paper',
+    downloadUrl: 'https://api.papermc.io/v2/projects/paper'
+  },
+  
   // Playit.gg
   playit: {
     downloadUrl: 'https://playit.gg/downloads',

@@ -15,7 +15,7 @@ export interface Server {
   id: string;
   name: string;
   version: string;
-  type: 'vanilla' | 'forge' | 'neoforge' | 'mohist';
+  type: 'vanilla' | 'forge' | 'neoforge' | 'mohist' | 'paper';
   port: number;
   ram: number;
   motd: string;
