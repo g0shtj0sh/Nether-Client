@@ -1,7 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import { X, Save, Settings } from 'lucide-react';
 import { Server as ServerType } from '../types';
+import { useThemeClasses } from '../contexts/ThemeContext';
+import { useRamOptions } from '../hooks/useRamOptions';
 
 interface ServerEditModalProps {
   server: ServerType;
@@ -10,6 +12,9 @@ interface ServerEditModalProps {
 }
 
 const ServerEditModal: React.FC<ServerEditModalProps> = ({ server, onClose, onSave }) => {
+  const { borderClass } = useThemeClasses();
+  const { ramOptions, loading: ramLoading } = useRamOptions();
+  
   const [config, setConfig] = useState({
     name: server.name,
     port: server.port,
@@ -30,9 +35,53 @@ const ServerEditModal: React.FC<ServerEditModalProps> = ({ server, onClose, onSa
     resourcePack: server.properties?.resourcePack ?? '',
   });
 
+  // Créer les options de RAM avec la valeur actuelle si elle n'est pas dans la liste
+  const ramOptionsWithCurrent = useMemo(() => {
+    if (ramLoading || ramOptions.length === 0) {
+      return [{ value: config.ram, label: `${Math.round(config.ram / 1024)} GB (${config.ram} MB)` }];
+    }
+    
+    const options = [...ramOptions];
+    const currentRamExists = options.some(opt => opt.value === config.ram);
+    
+    if (!currentRamExists && config.ram >= 2048) {
+      // Ajouter la valeur actuelle si elle n'existe pas et qu'elle est >= 2 GB
+      const ramGB = Math.round(config.ram / 1024);
+      options.push({ 
+        value: config.ram, 
+        label: `${ramGB} GB (${config.ram} MB) - Actuel` 
+      });
+      // Trier par valeur
+      options.sort((a, b) => a.value - b.value);
+    }
+    
+    return options;
+  }, [ramOptions, config.ram, ramLoading]);
+
   const handleSave = async () => {
     try {
       const { invoke } = await import('@tauri-apps/api/tauri');
+      
+      // Vérifier si la RAM a changé et mettre à jour le start.bat si nécessaire
+      if (config.ram !== server.ram) {
+        console.log(`🔄 RAM modifiée: ${server.ram} MB → ${config.ram} MB`);
+        try {
+          const ramUpdated = await invoke<boolean>('update_server_ram', {
+            serverName: config.name,
+            serverPath: server.path,
+            ramMb: config.ram
+          });
+          
+          if (ramUpdated) {
+            console.log('✅ RAM mise à jour dans le start.bat');
+          } else {
+            console.log('ℹ️ RAM déjà correcte dans le start.bat');
+          }
+        } catch (ramError) {
+          console.warn('⚠️ Erreur lors de la mise à jour de la RAM:', ramError);
+          // Continuer quand même, ce n'est pas bloquant
+        }
+      }
       
       // Préparer les propriétés pour server.properties
       const properties = {
@@ -98,7 +147,7 @@ const ServerEditModal: React.FC<ServerEditModalProps> = ({ server, onClose, onSa
         className="bg-gradient-to-br from-dark-100 to-dark-200 rounded-xl border border-dark-400 shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-hidden"
       >
         {/* Header */}
-        <div className="p-6 border-b-2 border-purple-500/30 shadow-[0_2px_10px_rgba(168,85,247,0.1)] flex items-center justify-between">
+        <div className={`p-6 border-b-2 ${borderClass} shadow-[0_2px_10px_var(--color-glow)] flex items-center justify-between`}>
           <div className="flex items-center space-x-3">
             <Settings className="w-6 h-6 text-primary-400" />
             <div>
@@ -178,16 +227,26 @@ const ServerEditModal: React.FC<ServerEditModalProps> = ({ server, onClose, onSa
 
               <div>
                 <label className="block text-sm font-medium text-white mb-2">
-                  RAM (MB)
+                  RAM
                 </label>
-                <input
-                  type="number"
-                  value={config.ram}
-                  onChange={(e) => setConfig({ ...config, ram: parseInt(e.target.value) })}
-                  className="input w-full"
-                  min="512"
-                  step="512"
-                />
+                {ramLoading ? (
+                  <div className="input w-full text-dark-400">
+                    Chargement des options...
+                  </div>
+                ) : (
+                  <select
+                    value={config.ram}
+                    onChange={(e) => setConfig({ ...config, ram: parseInt(e.target.value) })}
+                    className="input w-full"
+                  >
+                    {ramOptionsWithCurrent.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                        {option.recommended ? ' (Recommandé)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                )}
               </div>
 
               <div>
@@ -427,7 +486,7 @@ const ServerEditModal: React.FC<ServerEditModalProps> = ({ server, onClose, onSa
         </div>
 
         {/* Footer */}
-        <div className="p-6 border-t-2 border-purple-500/40 shadow-[0_-2px_10px_rgba(168,85,247,0.15)] flex justify-end space-x-3">
+        <div className={`p-6 border-t-2 ${borderClass} shadow-[0_-2px_10px_var(--color-glow)] flex justify-end space-x-3`}>
           <button
             onClick={onClose}
             className="px-6 py-2 bg-dark-700 hover:bg-dark-600 text-white rounded-lg transition-colors"

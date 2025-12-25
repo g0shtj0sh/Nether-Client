@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useTheme, ThemeType, useThemeClasses } from '../contexts/ThemeContext';
-import { useSystemInfo, formatMB } from '../hooks/useSystemInfo';
+import { useSystemInfo, formatMB, DiskInfo } from '../hooks/useSystemInfo';
 import { invoke } from '@tauri-apps/api/tauri';
 import { AppConfig } from '../types';
 import { JavaDownloader, AutoCleanup } from '../components/AutomationFeatures';
@@ -159,6 +159,7 @@ const AppearanceSection: React.FC = () => {
 // Composant pour la gestion des backups
 const BackupSection: React.FC<{config: any, setConfig: any}> = ({ config, setConfig }) => {
   const { t } = useLanguage();
+  const { borderClass } = useThemeClasses();
   const [backups, setBackups] = React.useState<BackupInfo[]>([]);
   const [servers, setServers] = React.useState<any[]>([]);
   const [selectedServer, setSelectedServer] = React.useState<string>('');
@@ -492,7 +493,7 @@ const BackupSection: React.FC<{config: any, setConfig: any}> = ({ config, setCon
               </div>
             </div>
 
-            <div className="flex gap-3 p-6 border-t-2 border-purple-500/40 shadow-[0_-2px_10px_rgba(168,85,247,0.15)]">
+            <div className={`flex gap-3 p-6 border-t-2 ${borderClass} shadow-[0_-2px_10px_var(--color-glow)]`}>
               <button
                 onClick={() => setShowRestoreModal(false)}
                 disabled={loading}
@@ -527,7 +528,7 @@ const BackupSection: React.FC<{config: any, setConfig: any}> = ({ config, setCon
 const Settings: React.FC<SettingsProps> = ({ config, setConfig }) => {
   const { language, setLanguage, t } = useLanguage();
   const { systemInfo, loading: systemLoading } = useSystemInfo();
-  const { buttonClass } = useThemeClasses();
+  const { buttonClass, borderClass } = useThemeClasses();
   
   const [activeTab, setActiveTab] = useState('general');
   const [localConfig, setLocalConfig] = useState({
@@ -676,38 +677,6 @@ const Settings: React.FC<SettingsProps> = ({ config, setConfig }) => {
               <p className="text-xs text-dark-500 mt-2">
                 RAM totale du PC: {formatMB(systemInfo.totalRam)} | Disponible: {formatMB(systemInfo.availableRam)}
               </p>
-            </div>
-
-            {/* Démarrage automatique */}
-            <div className="flex items-center justify-between">
-              <div>
-                <label className="block text-sm font-medium text-white mb-1">
-                  {t.settings.autoStart}
-                </label>
-                <p className="text-sm text-dark-400">{t.settings.autoStartDesc}</p>
-              </div>
-              <input
-                type="checkbox"
-                checked={localConfig.autoBackup}
-                onChange={(e) => setLocalConfig({ ...localConfig, autoBackup: e.target.checked })}
-                className="w-5 h-5"
-              />
-            </div>
-
-            {/* Notifications */}
-            <div className="flex items-center justify-between">
-              <div>
-                <label className="block text-sm font-medium text-white mb-1">
-                  {t.settings.notifications}
-                </label>
-                <p className="text-sm text-dark-400">{t.settings.notificationsDesc}</p>
-              </div>
-              <input
-                type="checkbox"
-                checked={true}
-                onChange={() => {}}
-                className="w-5 h-5"
-              />
             </div>
           </div>
         );
@@ -870,7 +839,7 @@ const Settings: React.FC<SettingsProps> = ({ config, setConfig }) => {
         return (
           <div className="space-y-6">
             <JavaDownloader />
-            <div className="border-t-2 border-purple-500/40 shadow-[0_-2px_10px_rgba(168,85,247,0.15)] pt-6">
+            <div className={`border-t-2 ${borderClass} shadow-[0_-2px_10px_var(--color-glow)] pt-6`}>
               <AutoCleanup />
             </div>
           </div>
@@ -885,7 +854,10 @@ const Settings: React.FC<SettingsProps> = ({ config, setConfig }) => {
               <div className="space-y-3">
                 <div className="flex justify-between text-sm">
                   <span className="text-dark-400">{t.settings.os}</span>
-                  <span className="text-white font-medium">{systemInfo.os} {systemInfo.osVersion}</span>
+                  <span className="text-white font-medium">
+                    {systemInfo.os} {systemInfo.osVersion}
+                    {systemInfo.osEdition && ` (${systemInfo.osEdition})`}
+                  </span>
                 </div>
                 <div className="flex justify-between text-sm">
                   <span className="text-dark-400">{t.settings.cpu}</span>
@@ -905,6 +877,44 @@ const Settings: React.FC<SettingsProps> = ({ config, setConfig }) => {
                 </div>
               </div>
             </div>
+
+            {/* Espace disque */}
+            {systemInfo.disks && systemInfo.disks.length > 0 && (
+              <div className="card bg-dark-800">
+                <h3 className="text-lg font-semibold text-white mb-4">Espace de stockage</h3>
+                <div className="space-y-4">
+                  {systemInfo.disks.map((disk, index) => {
+                    const usagePercent = (disk.usedSpace / disk.totalSpace) * 100;
+                    const isLowSpace = usagePercent > 80;
+                    
+                    return (
+                      <div key={index} className="space-y-2">
+                        <div className="flex justify-between items-center text-sm">
+                          <span className="text-dark-400 font-medium">
+                            {disk.mountPoint} ({disk.name})
+                          </span>
+                          <span className={`font-medium ${isLowSpace ? 'text-red-400' : 'text-white'}`}>
+                            {formatMB(disk.freeSpace)} libre / {formatMB(disk.totalSpace)} total
+                          </span>
+                        </div>
+                        <div className="w-full bg-dark-700 rounded-full h-2">
+                          <div
+                            className={`h-2 rounded-full transition-all ${
+                              isLowSpace ? 'bg-red-500' : usagePercent > 60 ? 'bg-yellow-500' : 'bg-green-500'
+                            }`}
+                            style={{ width: `${usagePercent}%` }}
+                          />
+                        </div>
+                        <div className="flex justify-between text-xs text-dark-400">
+                          <span>Utilisé: {formatMB(disk.usedSpace)}</span>
+                          <span>{Math.round(usagePercent)}%</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* Actions système */}
             <div className="space-y-3">
@@ -949,7 +959,7 @@ const Settings: React.FC<SettingsProps> = ({ config, setConfig }) => {
   return (
     <div className="min-h-screen flex overflow-y-auto overflow-x-hidden scrollbar-hide">
       {/* Sidebar des onglets */}
-      <div className="w-64 sidebar border-r border-dark-400 p-4">
+      <div className="w-64 sidebar p-4" style={{ borderRight: `1px solid var(--color-border, rgba(168, 85, 247, 0.4))` }}>
         <h2 className="text-xl font-bold text-white mb-6 drop-shadow-lg">{t.settings.title}</h2>
         <p className="text-sm text-dark-600 mb-6 drop-shadow-sm">{t.settings.subtitle}</p>
         

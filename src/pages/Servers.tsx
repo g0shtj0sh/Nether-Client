@@ -23,6 +23,14 @@ import PaperBuilder from '../components/builders/PaperBuilder';
 import ServerEditModal from '../components/ServerEditModal';
 import { useLanguage } from '../contexts/LanguageContext';
 
+interface Activity {
+  id: string;
+  type: 'start' | 'stop' | 'restart' | 'crash' | 'create' | 'delete';
+  serverName: string;
+  timestamp: Date;
+  message: string;
+}
+
 const Servers: React.FC = () => {
   const { t } = useLanguage();
   const [servers, setServers] = useState<ServerType[]>([]);
@@ -30,6 +38,50 @@ const Servers: React.FC = () => {
   const [selectedServer, setSelectedServer] = useState<ServerType | null>(null);
   const [showEditModal, setShowEditModal] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
+  const [isDeleting, setIsDeleting] = useState<string | null>(null);
+
+  // Fonction pour ajouter une activité
+  const addActivity = (type: Activity['type'], serverName: string, message?: string) => {
+    const getActivityMessage = (type: Activity['type'], serverName: string): string => {
+      switch (type) {
+        case 'start':
+          return `Serveur "${serverName}" démarré`;
+        case 'stop':
+          return `Serveur "${serverName}" arrêté`;
+        case 'restart':
+          return `Serveur "${serverName}" redémarré`;
+        case 'crash':
+          return `Serveur "${serverName}" a crashé`;
+        case 'create':
+          return `Serveur "${serverName}" créé`;
+        case 'delete':
+          return `Serveur "${serverName}" supprimé`;
+        default:
+          return `Activité sur "${serverName}"`;
+      }
+    };
+
+    const activity: Activity = {
+      id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
+      type,
+      serverName,
+      timestamp: new Date(),
+      message: message || getActivityMessage(type, serverName)
+    };
+
+    // Charger les activités existantes
+    const savedActivities = localStorage.getItem('nether-client-activities');
+    const existingActivities: Activity[] = savedActivities 
+      ? JSON.parse(savedActivities).map((a: any) => ({
+          ...a,
+          timestamp: new Date(a.timestamp)
+        }))
+      : [];
+
+    // Ajouter la nouvelle activité et garder seulement les 50 dernières
+    const updated = [activity, ...existingActivities].slice(0, 50);
+    localStorage.setItem('nether-client-activities', JSON.stringify(updated));
+  };
 
   useEffect(() => {
     const savedServers = localStorage.getItem('nether-client-servers');
@@ -139,6 +191,9 @@ const Servers: React.FC = () => {
           serverPath: server.path 
         });
 
+        // Enregistrer l'activité
+        addActivity(action === 'restart' ? 'restart' : 'start', server.name);
+
         // Vérifier le statut après démarrage
         setTimeout(async () => {
           const isRunning = await invoke<boolean>('get_server_status', { serverName: server.name });
@@ -153,6 +208,9 @@ const Servers: React.FC = () => {
         }, 3000);
       } else if (action === 'stop') {
         await invoke('stop_server', { serverName: server.name });
+        
+        // Enregistrer l'activité
+        addActivity('stop', server.name);
         
         const updatedServers = servers.map(s => 
           s.id === serverId ? { ...s, status: 'stopped' as const } : s
@@ -173,8 +231,16 @@ const Servers: React.FC = () => {
     const server = servers.find(s => s.id === serverId);
     if (!server) return;
 
-    if (!confirm(t.servers.deleteConfirm)) return;
+    // Empêcher les doubles-clics
+    if (isDeleting === serverId) {
+      console.log('Suppression déjà en cours...');
+      return;
+    }
 
+    // Marquer comme en cours de suppression pour éviter les doubles-clics
+    setIsDeleting(serverId);
+
+    // Seulement maintenant, procéder à la suppression
     try {
       const { invoke } = await import('@tauri-apps/api/tauri');
       
@@ -198,10 +264,16 @@ const Servers: React.FC = () => {
       setServers(updatedServers);
       localStorage.setItem('nether-client-servers', JSON.stringify(updatedServers));
 
+      // Enregistrer l'activité
+      addActivity('delete', server.name);
+
       alert(`✅ Serveur "${server.name}" supprimé avec succès !\n\nDossier supprimé : ${server.path}`);
     } catch (error) {
       console.error('Erreur suppression serveur:', error);
       alert(`❌ Erreur lors de la suppression: ${error}`);
+    } finally {
+      // Réinitialiser l'état de suppression
+      setIsDeleting(null);
     }
   };
 
@@ -470,8 +542,10 @@ const Servers: React.FC = () => {
                 </motion.button>
                 <motion.button
                   onClick={() => handleDeleteServer(server.id)}
-                  className="p-1 text-dark-400 hover:text-red-400"
-                  whileHover={{ scale: 1.1 }}
+                  disabled={isDeleting === server.id}
+                  className="p-1 text-dark-400 hover:text-red-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                  whileHover={{ scale: isDeleting === server.id ? 1 : 1.1 }}
+                  title={isDeleting === server.id ? 'Suppression en cours...' : 'Supprimer le serveur'}
                 >
                   <Trash2 className="w-4 h-4" />
                 </motion.button>
@@ -608,6 +682,8 @@ const Servers: React.FC = () => {
             onServerCreated={(server) => {
               setServers(prev => [...prev, server]);
               localStorage.setItem('nether-client-servers', JSON.stringify([...servers, server]));
+              // Enregistrer l'activité
+              addActivity('create', server.name);
               setShowBuilder(null);
             }}
           />
@@ -619,6 +695,8 @@ const Servers: React.FC = () => {
             onServerCreated={(server) => {
               setServers(prev => [...prev, server]);
               localStorage.setItem('nether-client-servers', JSON.stringify([...servers, server]));
+              // Enregistrer l'activité
+              addActivity('create', server.name);
               setShowBuilder(null);
             }}
           />
@@ -630,6 +708,8 @@ const Servers: React.FC = () => {
             onServerCreated={(server) => {
               setServers(prev => [...prev, server]);
               localStorage.setItem('nether-client-servers', JSON.stringify([...servers, server]));
+              // Enregistrer l'activité
+              addActivity('create', server.name);
               setShowBuilder(null);
             }}
           />
@@ -641,6 +721,8 @@ const Servers: React.FC = () => {
             onServerCreated={(server) => {
               setServers(prev => [...prev, server]);
               localStorage.setItem('nether-client-servers', JSON.stringify([...servers, server]));
+              // Enregistrer l'activité
+              addActivity('create', server.name);
               setShowBuilder(null);
             }}
           />
@@ -652,6 +734,8 @@ const Servers: React.FC = () => {
             onServerCreated={(server) => {
               setServers(prev => [...prev, server]);
               localStorage.setItem('nether-client-servers', JSON.stringify([...servers, server]));
+              // Enregistrer l'activité
+              addActivity('create', server.name);
               setShowBuilder(null);
             }}
           />

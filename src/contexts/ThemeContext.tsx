@@ -65,6 +65,21 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     document.documentElement.style.setProperty('--color-secondary', colors.secondary);
     document.documentElement.style.setProperty('--color-accent', colors.accent);
     document.documentElement.style.setProperty('--color-glow', colors.glow);
+    
+    // Définir la couleur de bordure selon le thème
+    let borderColor = 'rgba(168, 85, 247, 0.4)'; // Par défaut (End)
+    switch (theme) {
+      case 'nether':
+        borderColor = 'rgba(220, 38, 38, 0.4)'; // Rouge
+        break;
+      case 'end':
+        borderColor = 'rgba(168, 85, 247, 0.4)'; // Violet
+        break;
+      case 'overworld':
+        borderColor = 'rgba(22, 163, 74, 0.4)'; // Vert
+        break;
+    }
+    document.documentElement.style.setProperty('--color-border', borderColor);
   }, [theme]);
 
   const setTheme = (newTheme: ThemeType) => {

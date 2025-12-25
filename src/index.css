@@ -134,7 +134,8 @@
   }
   
   .sidebar {
-    @apply bg-gradient-to-b from-dark-100 to-dark-200 border-r border-dark-400 backdrop-blur-sm;
+    @apply bg-gradient-to-b from-dark-100 to-dark-200 backdrop-blur-sm;
+    border-right: 1px solid var(--color-border, rgba(168, 85, 247, 0.4));
     background-image: 
       linear-gradient(180deg, var(--color-glow) 0%, transparent 100%),
       radial-gradient(circle at top, var(--color-glow) 0%, transparent 70%);
@@ -181,15 +182,15 @@
     box-sizing: border-box;
   }
   
-  /* Styles robustes pour les bordures */
+  /* Styles robustes pour les bordures - utilise les variables CSS du thème */
   .app-container {
-    border-color: rgba(168, 85, 247, 0.4) !important;
+    border-color: var(--color-border, rgba(168, 85, 247, 0.4)) !important;
     border-width: 1px !important;
     border-style: solid !important;
-    border-left: 1px solid rgba(168, 85, 247, 0.4) !important;
-    border-right: 1px solid rgba(168, 85, 247, 0.4) !important;
-    border-top: 1px solid rgba(168, 85, 247, 0.4) !important;
-    border-bottom: 1px solid rgba(168, 85, 247, 0.4) !important;
+    border-left: 1px solid var(--color-border, rgba(168, 85, 247, 0.4)) !important;
+    border-right: 1px solid var(--color-border, rgba(168, 85, 247, 0.4)) !important;
+    border-top: 1px solid var(--color-border, rgba(168, 85, 247, 0.4)) !important;
+    border-bottom: 1px solid var(--color-border, rgba(168, 85, 247, 0.4)) !important;
   }
   
   /* Force le rendu des bordures */
@@ -200,11 +201,11 @@
     left: 0;
     right: 0;
     bottom: 0;
-    border: 1px solid rgba(168, 85, 247, 0.4);
-    border-left: 1px solid rgba(168, 85, 247, 0.4) !important;
-    border-right: 1px solid rgba(168, 85, 247, 0.4) !important;
-    border-top: 1px solid rgba(168, 85, 247, 0.4) !important;
-    border-bottom: 1px solid rgba(168, 85, 247, 0.4) !important;
+    border: 1px solid var(--color-border, rgba(168, 85, 247, 0.4));
+    border-left: 1px solid var(--color-border, rgba(168, 85, 247, 0.4)) !important;
+    border-right: 1px solid var(--color-border, rgba(168, 85, 247, 0.4)) !important;
+    border-top: 1px solid var(--color-border, rgba(168, 85, 247, 0.4)) !important;
+    border-bottom: 1px solid var(--color-border, rgba(168, 85, 247, 0.4)) !important;
     border-radius: inherit;
     pointer-events: none;
     z-index: -1;
@@ -218,7 +219,7 @@
     left: 0;
     bottom: 0;
     width: 1px;
-    background: rgba(168, 85, 247, 0.4);
+    background: var(--color-border, rgba(168, 85, 247, 0.4));
     pointer-events: none;
     z-index: 1;
   }

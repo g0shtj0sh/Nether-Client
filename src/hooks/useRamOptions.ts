@@ -22,47 +22,33 @@ export const useRamOptions = () => {
     const totalRamMB = systemInfo.totalRam;
     const totalRamGB = Math.floor(totalRamMB / 1024);
     
-    // Calculer la RAM recommandée (environ 25% de la RAM totale, avec un minimum de 1GB et un maximum de 8GB)
-    const recommendedRamMB = Math.min(Math.max(Math.floor(totalRamMB * 0.25), 1024), 8192);
+    // Calculer la RAM recommandée (environ 25% de la RAM totale, avec un minimum de 2GB et un maximum de 8GB)
+    const recommendedRamMB = Math.min(Math.max(Math.floor(totalRamMB * 0.25), 2048), 8192);
+    
+    // Ne pas dépasser 50% de la RAM totale pour laisser de la RAM au système
+    const maxRamMB = Math.floor(totalRamMB * 0.5);
     
     const options: RamOption[] = [];
     
-    // Générer les options en fonction de la RAM disponible
-    if (totalRamGB >= 2) {
-      options.push({ value: 1024, label: '1 GB' });
-    }
+    // Générer les options progressives de 2 GB jusqu'à la limite du système
+    // Commence à 2 GB (2048 MB)
+    let currentRamMB = 2048;
     
-    if (totalRamGB >= 4) {
-      options.push({ value: 2048, label: '2 GB' });
-    }
-    
-    if (totalRamGB >= 6) {
-      options.push({ value: 4096, label: '4 GB' });
-    }
-    
-    if (totalRamGB >= 8) {
-      options.push({ value: 6144, label: '6 GB' });
-    }
-    
-    if (totalRamGB >= 12) {
-      options.push({ value: 8192, label: '8 GB' });
-    }
-    
-    if (totalRamGB >= 16) {
-      options.push({ value: 12288, label: '12 GB' });
-    }
-    
-    if (totalRamGB >= 20) {
-      options.push({ value: 16384, label: '16 GB' });
-    }
-    
-    if (totalRamGB >= 24) {
-      options.push({ value: 20480, label: '20 GB' });
-    }
-    
-    if (totalRamGB >= 32) {
-      options.push({ value: 24576, label: '24 GB' });
-      options.push({ value: 32768, label: '32 GB' });
+    while (currentRamMB <= maxRamMB && currentRamMB <= totalRamMB) {
+      const ramGB = currentRamMB / 1024;
+      options.push({ 
+        value: currentRamMB, 
+        label: `${ramGB} GB` 
+      });
+      
+      // Augmenter le pas progressivement pour les grandes valeurs
+      if (currentRamMB >= 16384) {
+        // Au-delà de 16 GB, augmenter par pas de 4 GB
+        currentRamMB += 4096;
+      } else {
+        // En dessous de 16 GB, augmenter par pas de 2 GB
+        currentRamMB += 2048;
+      }
     }
     
     // Marquer l'option recommandée

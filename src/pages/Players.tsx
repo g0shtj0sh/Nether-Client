@@ -218,7 +218,7 @@ const Players: React.FC = () => {
           onListUpdate={loadListsFromServer}
         />
       ) : (
-        <div className="rounded-lg p-12 text-center border border-purple-500/30">
+        <div className={`rounded-lg p-12 text-center border ${borderClass}`}>
           <ServerIcon className="w-16 h-16 text-dark-600 mx-auto mb-4" />
           <p className="text-dark-400 text-lg">{t.players.selectServerToManage}</p>
         </div>

@@ -19,6 +19,7 @@ import logoImage from '../assets/logo.png';
 import { useLanguage } from '../contexts/LanguageContext';
 import { CrashDetector } from '../components/AutomationFeatures';
 import AdvancedMonitoring from '../components/AdvancedMonitoring';
+import { useThemeClasses } from '../contexts/ThemeContext';
 
 interface DashboardProps {
   setCurrentPage: (page: string) => void;
@@ -41,6 +42,7 @@ interface Activity {
 
 const Dashboard: React.FC<DashboardProps> = ({ setCurrentPage }) => {
   const { t } = useLanguage();
+  const { borderClass } = useThemeClasses();
   const [servers, setServers] = useState<ServerType[]>([]);
   const [realTimeStats, setRealTimeStats] = useState<Record<string, RealTimeServerStats>>({});
   const [showAdvancedMonitoring, setShowAdvancedMonitoring] = useState(false);
@@ -329,7 +331,7 @@ const Dashboard: React.FC<DashboardProps> = ({ setCurrentPage }) => {
     <div className="h-full p-6 overflow-y-auto overflow-x-hidden scrollbar-hide">
       {/* Hero Header */}
       <motion.div 
-        className="mb-12 text-center pb-8 border-b-2 border-purple-500/40"
+        className={`mb-12 text-center pb-8 border-b-2 ${borderClass}`}
         initial={{ opacity: 0, y: -20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.6 }}
@@ -634,7 +636,7 @@ const Dashboard: React.FC<DashboardProps> = ({ setCurrentPage }) => {
                           key={activity.id}
                           initial={{ opacity: 0, x: 20 }}
                           animate={{ opacity: 1, x: 0 }}
-                          className="bg-dark-800 rounded-lg p-3 border border-dark-700 hover:border-purple-500/30 transition-colors"
+                          className="bg-dark-800 rounded-lg p-3 border border-dark-700 hover:border-primary-500/30 transition-colors"
                         >
                           <div className="flex items-start gap-3">
                             <div className="mt-0.5 flex-shrink-0">
@@ -672,7 +674,7 @@ const Dashboard: React.FC<DashboardProps> = ({ setCurrentPage }) => {
             className="bg-dark-100 rounded-xl w-full max-w-7xl max-h-[90vh] overflow-hidden shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between p-4 border-b-2 border-purple-500/40 shadow-[0_2px_10px_rgba(168,85,247,0.2)] bg-gradient-to-r from-purple-900/20 to-pink-900/20">
+            <div className={`flex items-center justify-between p-4 border-b-2 ${borderClass} shadow-[0_2px_10px_var(--color-glow)] bg-gradient-to-r from-purple-900/20 to-pink-900/20`}>
               <h2 className="text-2xl font-bold flex items-center gap-2">
                 <Activity className="w-6 h-6 text-purple-400" />
                 Monitoring Avancé - {monitoringServer.name}

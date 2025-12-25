@@ -1,9 +1,18 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/tauri';
 
+export interface DiskInfo {
+  mountPoint: string;
+  totalSpace: number;
+  usedSpace: number;
+  freeSpace: number;
+  name: string;
+}
+
 export interface SystemInfo {
   os: string;
   osVersion: string;
+  osEdition?: string;
   arch: string;
   cpu: string;
   cpuCores: number;
@@ -13,6 +22,7 @@ export interface SystemInfo {
   totalDisk: number;
   usedDisk: number;
   freeDisk: number;
+  disks?: DiskInfo[];
 }
 
 export const useSystemInfo = () => {

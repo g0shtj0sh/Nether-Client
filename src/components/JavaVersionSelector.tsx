@@ -9,6 +9,7 @@ import {
   X,
   ExternalLink
 } from 'lucide-react';
+import { useThemeClasses } from '../contexts/ThemeContext';
 
 interface JavaVersion {
   path: string;
@@ -28,6 +29,7 @@ const JavaVersionSelector: React.FC<JavaVersionSelectorProps> = ({
   onJavaSelected,
   onClose
 }) => {
+  const { borderClass } = useThemeClasses();
   const [javaVersions, setJavaVersions] = useState<JavaVersion[]>([]);
   const [selectedJava, setSelectedJava] = useState<JavaVersion | null>(null);
   const [recommendedVersion, setRecommendedVersion] = useState<string>('');
@@ -142,7 +144,7 @@ const JavaVersionSelector: React.FC<JavaVersionSelectorProps> = ({
         className="bg-gradient-to-br from-dark-100 to-dark-200 rounded-xl border border-dark-400 shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-hidden"
       >
         {/* Header */}
-        <div className="p-6 border-b-2 border-purple-500/30 shadow-[0_2px_10px_rgba(168,85,247,0.1)] flex items-center justify-between">
+        <div className={`p-6 border-b-2 ${borderClass} shadow-[0_2px_10px_var(--color-glow)] flex items-center justify-between`}>
           <div className="flex items-center space-x-3">
             <Settings className="w-6 h-6 text-primary-400" />
             <div>
@@ -274,7 +276,7 @@ const JavaVersionSelector: React.FC<JavaVersionSelectorProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="p-6 border-t-2 border-purple-500/40 shadow-[0_-2px_10px_rgba(168,85,247,0.15)] flex justify-between">
+        <div className={`p-6 border-t-2 ${borderClass} shadow-[0_-2px_10px_var(--color-glow)] flex justify-between`}>
           <div className="text-sm text-dark-400">
             {selectedJava ? (
               <span>Java {selectedJava.version} sélectionné</span>

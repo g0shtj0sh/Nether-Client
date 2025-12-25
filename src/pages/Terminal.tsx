@@ -16,10 +16,10 @@ import {
   Search,
   ArrowUp,
   ArrowDown,
-  Play,
-  Pause,
   FileText,
-  Code
+  Code,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 import { LogEntry, Server as ServerType } from '../types';
 import { useLanguage } from '../contexts/LanguageContext';
@@ -35,11 +35,11 @@ const Terminal: React.FC = () => {
   const [filter, setFilter] = useState<'all' | 'info' | 'warn' | 'error' | 'debug'>('all');
   const [searchTerm, setSearchTerm] = useState('');
   const [autoScroll, setAutoScroll] = useState(false);
-  const [isPaused, setIsPaused] = useState(false);
   const [commandHistory, setCommandHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [showTimestamps, setShowTimestamps] = useState(true);
   const [wordWrap, setWordWrap] = useState(true);
+  const [hideLowPriorityWarnings, setHideLowPriorityWarnings] = useState(false);
   
   const terminalRef = useRef<HTMLDivElement>(null);
   const commandRef = useRef<HTMLInputElement>(null);
@@ -101,7 +101,7 @@ const Terminal: React.FC = () => {
   }, [selectedServer]);
 
   useEffect(() => {
-    if (selectedServer && !isPaused) {
+    if (selectedServer) {
       loadServerLogs();
       
       const interval = setInterval(() => {
@@ -112,7 +112,34 @@ const Terminal: React.FC = () => {
       
       return () => clearInterval(interval);
     }
-  }, [selectedServer, isPaused]);
+  }, [selectedServer]);
+
+  // Fonction pour parser le timestamp depuis une ligne de log Minecraft
+  const parseLogTimestamp = (line: string): Date => {
+    // Format Minecraft: [HH:MM:SS] [Thread/LEVEL]: Message
+    // Exemple: [12:34:56] [main/INFO]: Starting minecraft server version 1.20.1
+    
+    const timestampMatch = line.match(/\[(\d{2}):(\d{2}):(\d{2})\]/);
+    if (timestampMatch) {
+      const [, hours, minutes, seconds] = timestampMatch;
+      const now = new Date();
+      const logDate = new Date();
+      logDate.setHours(parseInt(hours, 10));
+      logDate.setMinutes(parseInt(minutes, 10));
+      logDate.setSeconds(parseInt(seconds, 10));
+      logDate.setMilliseconds(0);
+      
+      // Si l'heure du log est supérieure à l'heure actuelle, c'est probablement hier
+      if (logDate > now) {
+        logDate.setDate(logDate.getDate() - 1);
+      }
+      
+      return logDate;
+    }
+    
+    // Si pas de timestamp trouvé, utiliser l'heure actuelle (pour les nouveaux logs)
+    return new Date();
+  };
 
   const loadServerLogs = async () => {
     if (!selectedServer) return;
@@ -123,32 +150,105 @@ const Terminal: React.FC = () => {
         serverName: selectedServer.name 
       });
       
-      const parsedLogs: LogEntry[] = logLines.map((line, index) => {
-        let level: 'info' | 'warn' | 'error' | 'debug' = 'info';
+      // Garder une référence aux logs existants pour préserver les timestamps
+      setLogs(prevLogs => {
+        const existingMessages = new Set(prevLogs.map(log => log.message));
+        const newLogs: LogEntry[] = [];
         
-        if (line.toLowerCase().includes('warn')) level = 'warn';
-        else if (line.toLowerCase().includes('error')) level = 'error';
-        else if (line.toLowerCase().includes('debug')) level = 'debug';
+        logLines.forEach((line, index) => {
+          // Si le log existe déjà, garder son timestamp original
+          const existingLog = prevLogs.find(log => log.message === line);
+          
+          if (existingLog) {
+            newLogs.push(existingLog);
+          } else {
+            // Nouveau log, parser le timestamp depuis la ligne
+            let level: 'info' | 'warn' | 'error' | 'debug' = 'info';
+            
+            // Détection améliorée des niveaux de log
+            const lineLower = line.toLowerCase();
+            
+            // Détection des warnings - plus détaillée
+            // D'abord détecter les warnings non critiques (informatifs)
+            const isLowPriorityWarning = 
+              lineLower.includes('deprecated') ||
+              lineLower.includes('outdated') ||
+              lineLower.includes('legacy') ||
+              lineLower.includes('consider using') ||
+              lineLower.includes('recommend') ||
+              lineLower.includes('suggestion') ||
+              lineLower.includes('note:') ||
+              lineLower.includes('info:') ||
+              lineLower.includes('version') && (lineLower.includes('old') || lineLower.includes('new')) ||
+              lineLower.includes('plugin') && lineLower.includes('version') ||
+              lineLower.includes('api') && (lineLower.includes('deprecated') || lineLower.includes('old'));
+            
+            // Ensuite détecter les warnings critiques
+            const isCriticalWarning = 
+              lineLower.includes('/warn') || 
+              lineLower.includes('[warn]') || 
+              (lineLower.includes('warning') && !isLowPriorityWarning) ||
+              lineLower.includes('warn:') ||
+              lineLower.match(/\[.*\/warn.*\]/i) ||
+              lineLower.includes('⚠') ||
+              lineLower.includes('failed to') ||
+              lineLower.includes('unable to') ||
+              lineLower.includes('cannot') ||
+              lineLower.includes('missing') ||
+              lineLower.includes('not found') ||
+              lineLower.includes('timeout') ||
+              lineLower.includes('connection') && (lineLower.includes('refused') || lineLower.includes('failed')) ||
+              lineLower.includes('memory') && (lineLower.includes('low') || lineLower.includes('high')) ||
+              lineLower.includes('performance') ||
+              lineLower.includes('lag') ||
+              lineLower.includes('tps') && (lineLower.includes('low') || lineLower.includes('dropped'));
+            
+            if (isCriticalWarning) {
+              level = 'warn';
+            } else if (isLowPriorityWarning) {
+              // Marquer comme info mais avec un indicateur spécial
+              level = 'info';
+            }
+            // Détection des erreurs
+            else if (lineLower.includes('/error') || 
+                     lineLower.includes('[error]') || 
+                     lineLower.includes('error:') ||
+                     lineLower.match(/\[.*\/error.*\]/i) ||
+                     lineLower.includes('exception') ||
+                     lineLower.includes('failed') ||
+                     lineLower.includes('crash') ||
+                     lineLower.includes('fatal')) {
+              level = 'error';
+            }
+            // Détection du debug
+            else if (lineLower.includes('/debug') || 
+                     lineLower.includes('[debug]') || 
+                     lineLower.includes('debug:') ||
+                     lineLower.match(/\[.*\/debug.*\]/i)) {
+              level = 'debug';
+            }
+            
+            newLogs.push({
+              timestamp: parseLogTimestamp(line),
+              level,
+              message: line,
+              serverId: selectedServer.id
+            });
+          }
+        });
         
-        return {
-          timestamp: new Date(),
-          level,
-          message: line,
-          serverId: selectedServer.id
-        };
+        return newLogs;
       });
-      
-      setLogs(parsedLogs);
     } catch (error) {
       console.error('Erreur lors du chargement des logs:', error);
     }
   };
 
   useEffect(() => {
-    if (autoScroll && terminalRef.current && !isPaused) {
+    if (autoScroll && terminalRef.current) {
       terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
     }
-  }, [logs, autoScroll, isPaused]);
+  }, [logs, autoScroll]);
 
   const handleCommandSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -270,28 +370,88 @@ const Terminal: React.FC = () => {
     return `${timestamp}[${log.level.toUpperCase()}] ${log.message}`;
   };
 
-  const getLogColor = (level: string): string => {
+  const getLogColor = (level: string, message: string): string => {
+    const isLowPriority = isLowPriorityWarning(message);
+    
     switch (level) {
-      case 'error': return 'text-red-400 bg-red-900/20';
-      case 'warn': return 'text-yellow-400 bg-yellow-900/20';
+      case 'error': return 'text-red-400 bg-red-900/30 border-l-4 border-red-500';
+      case 'warn': return 'text-yellow-300 bg-yellow-900/30 border-l-4 border-yellow-500';
       case 'debug': return 'text-gray-400 bg-gray-900/20';
+      case 'info':
+        // Si c'est un warning non critique marqué comme info, utiliser un style différent
+        if (isLowPriority) {
+          return 'text-gray-400 bg-gray-800/20 border-l-2 border-gray-600/50 opacity-75';
+        }
+        return 'text-green-400 bg-green-900/20';
       default: return 'text-green-400 bg-green-900/20';
     }
   };
 
-  const getLevelIcon = (level: string) => {
+  const getLevelIcon = (level: string, message: string) => {
+    const isLowPriority = isLowPriorityWarning(message);
+    
     switch (level) {
-      case 'error': return <AlertCircle className="w-4 h-4" />;
-      case 'warn': return <AlertCircle className="w-4 h-4" />;
-      case 'debug': return <Code className="w-4 h-4" />;
-      default: return <Info className="w-4 h-4" />;
+      case 'error': return <AlertCircle className="w-4 h-4 text-red-400" />;
+      case 'warn': return <AlertCircle className="w-4 h-4 text-yellow-400" />;
+      case 'debug': return <Code className="w-4 h-4 text-gray-400" />;
+      case 'info':
+        // Si c'est un warning non critique, utiliser une icône différente
+        if (isLowPriority) {
+          return <Info className="w-4 h-4 text-gray-500" />;
+        }
+        return <Info className="w-4 h-4 text-green-400" />;
+      default: return <Info className="w-4 h-4 text-green-400" />;
     }
+  };
+
+  // Fonction pour détecter si un log est un warning non critique (informatif)
+  const isLowPriorityWarning = (message: string): boolean => {
+    const lineLower = message.toLowerCase();
+    return (
+      lineLower.includes('deprecated') ||
+      lineLower.includes('outdated') ||
+      lineLower.includes('legacy') ||
+      lineLower.includes('consider using') ||
+      lineLower.includes('recommend') ||
+      lineLower.includes('suggestion') ||
+      lineLower.includes('note:') ||
+      (lineLower.includes('version') && (lineLower.includes('old') || lineLower.includes('new'))) ||
+      (lineLower.includes('plugin') && lineLower.includes('version')) ||
+      (lineLower.includes('api') && (lineLower.includes('deprecated') || lineLower.includes('old')))
+    );
+  };
+
+  // Fonction pour extraire les détails d'un warning
+  const extractWarningDetails = (message: string): { thread?: string; source?: string; details?: string } => {
+    const details: { thread?: string; source?: string; details?: string } = {};
+    
+    // Extraire le thread depuis le format [HH:MM:SS] [Thread/LEVEL]: Message
+    const threadMatch = message.match(/\[.*?\]\s*\[([^\/]+)\//);
+    if (threadMatch) {
+      details.thread = threadMatch[1].trim();
+    }
+    
+    // Extraire la source (classe/méthode) si présente
+    const sourceMatch = message.match(/at\s+([\w\.\$]+)/);
+    if (sourceMatch) {
+      details.source = sourceMatch[1];
+    }
+    
+    // Extraire des détails supplémentaires
+    const detailMatch = message.match(/:\s*(.+)/);
+    if (detailMatch && detailMatch[1].length > 0) {
+      details.details = detailMatch[1].substring(0, 200); // Limiter à 200 caractères
+    }
+    
+    return details;
   };
 
   const filteredLogs = logs.filter(log => {
     const matchesFilter = filter === 'all' || log.level === filter;
     const matchesSearch = !searchTerm || log.message.toLowerCase().includes(searchTerm.toLowerCase());
-    return matchesFilter && matchesSearch;
+    const isLowPriority = isLowPriorityWarning(log.message);
+    const hideLowPriority = hideLowPriorityWarnings && isLowPriority;
+    return matchesFilter && matchesSearch && !hideLowPriority;
   });
 
   const logStats = {
@@ -413,20 +573,21 @@ const Terminal: React.FC = () => {
                 </button>
 
                 <button
-                  onClick={() => setIsPaused(!isPaused)}
-                  className={`p-2 rounded-lg ${isPaused ? 'bg-yellow-600' : 'bg-dark-700'}`}
-                  title={isPaused ? t.terminal.resume : t.terminal.pause}
-                >
-                  {isPaused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
-                </button>
-
-                <button
                   onClick={() => setAutoScroll(!autoScroll)}
                   className={`p-2 rounded-lg ${autoScroll ? '' : 'bg-dark-700'}`}
                   style={autoScroll ? { backgroundColor: 'var(--color-primary)' } : {}}
                   title={t.terminal.autoScroll}
                 >
                   <ArrowDown className="w-4 h-4" />
+                </button>
+
+                <button
+                  onClick={() => setHideLowPriorityWarnings(!hideLowPriorityWarnings)}
+                  className={`p-2 rounded-lg ${hideLowPriorityWarnings ? '' : 'bg-dark-700'}`}
+                  style={hideLowPriorityWarnings ? { backgroundColor: 'var(--color-primary)' } : {}}
+                  title={hideLowPriorityWarnings ? 'Afficher les warnings non critiques' : 'Masquer les warnings non critiques'}
+                >
+                  {hideLowPriorityWarnings ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
               </div>
 
@@ -438,14 +599,6 @@ const Terminal: React.FC = () => {
                   title={t.terminal.copy}
                 >
                   <Copy className="w-4 h-4" />
-                </button>
-
-                <button
-                  onClick={() => downloadLogs('txt')}
-                  className="p-2 bg-green-600 hover:bg-green-700 rounded-lg"
-                  title={t.terminal.downloadTxt}
-                >
-                  <Download className="w-4 h-4" />
                 </button>
 
                 <button
@@ -484,25 +637,65 @@ const Terminal: React.FC = () => {
             </div>
           ) : (
             <div className="space-y-1">
-              {filteredLogs.map((log, index) => (
-                <motion.div
-                  key={index}
-                  initial={{ opacity: 0, x: -20 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ duration: 0.1 }}
-                  className={`p-2 rounded ${getLogColor(log.level)} hover:brightness-110 transition-all`}
-                >
-                  <div className="flex items-start gap-2">
-                    <span className="mt-0.5">{getLevelIcon(log.level)}</span>
-                    {showTimestamps && (
-                      <span className="text-gray-500 text-xs">
-                        [{log.timestamp.toLocaleTimeString()}]
-                      </span>
-                    )}
-                    <span className="flex-1 break-words">{log.message}</span>
-                  </div>
-                </motion.div>
-              ))}
+              {filteredLogs.map((log, index) => {
+                const isLowPriority = isLowPriorityWarning(log.message);
+                const warningDetails = log.level === 'warn' ? extractWarningDetails(log.message) : null;
+                const isInfoWarning = log.level === 'info' && isLowPriority;
+                
+                return (
+                  <motion.div
+                    key={index}
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ duration: 0.1 }}
+                    className={`p-3 rounded-lg ${getLogColor(log.level, log.message)} hover:brightness-110 transition-all ${
+                      log.level === 'warn' ? 'shadow-lg shadow-yellow-900/20' : ''
+                    } ${isInfoWarning ? 'hover:opacity-100' : ''}`}
+                  >
+                    <div className="flex items-start gap-2">
+                      <span className="mt-0.5 flex-shrink-0">{getLevelIcon(log.level, log.message)}</span>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-start gap-2 flex-wrap">
+                          {showTimestamps && (
+                            <span className={`text-xs font-mono flex-shrink-0 ${
+                              isInfoWarning ? 'text-gray-500' : 'text-gray-400'
+                            }`}>
+                              [{log.timestamp.toLocaleTimeString()}]
+                            </span>
+                          )}
+                          {log.level === 'warn' && warningDetails?.thread && (
+                            <span className="text-yellow-400/70 text-xs font-semibold px-2 py-0.5 bg-yellow-900/40 rounded flex-shrink-0">
+                              {warningDetails.thread}
+                            </span>
+                          )}
+                          {log.level === 'warn' && (
+                            <span className="text-yellow-400/80 text-xs font-bold uppercase flex-shrink-0">
+                              ⚠ WARNING CRITIQUE
+                            </span>
+                          )}
+                          {isInfoWarning && (
+                            <span className="text-gray-500 text-xs font-medium px-2 py-0.5 bg-gray-800/40 rounded flex-shrink-0">
+                              ℹ Info (Non critique)
+                            </span>
+                          )}
+                        </div>
+                        <div className="mt-1">
+                          <span className={`break-words text-sm ${isInfoWarning ? 'text-gray-400' : ''}`}>
+                            {log.message}
+                          </span>
+                        </div>
+                        {log.level === 'warn' && warningDetails?.source && (
+                          <div className="mt-2 pt-2 border-t border-yellow-700/30">
+                            <div className="text-xs text-yellow-300/60">
+                              <span className="font-semibold">Source:</span> {warningDetails.source}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </motion.div>
+                );
+              })}
             </div>
           )}
         </div>

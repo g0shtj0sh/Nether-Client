@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import logoImage from '../assets/logo.png';
 import { useLanguage } from '../contexts/LanguageContext';
+import { useThemeClasses } from '../contexts/ThemeContext';
 
 interface SidebarProps {
   currentPage: string;
@@ -20,6 +21,7 @@ interface SidebarProps {
 
 const Sidebar: React.FC<SidebarProps> = ({ currentPage, setCurrentPage }) => {
   const { t } = useLanguage();
+  const { borderClass } = useThemeClasses();
   
   const menuItems = [
     { id: 'dashboard', label: t.sidebar.dashboard, icon: LayoutDashboard },
@@ -39,7 +41,7 @@ const Sidebar: React.FC<SidebarProps> = ({ currentPage, setCurrentPage }) => {
       className="w-64 sidebar flex flex-col rounded-bl-xl"
     >
       {/* Logo et titre */}
-      <div className="p-6 border-b-2 border-purple-500/40 shadow-[0_2px_10px_rgba(168,85,247,0.2)]">
+      <div className={`p-6 border-b-2 ${borderClass} shadow-[0_2px_10px_var(--color-glow)]`}>
         <div className="flex items-center space-x-3">
           <img 
             src={logoImage} 
@@ -89,7 +91,7 @@ const Sidebar: React.FC<SidebarProps> = ({ currentPage, setCurrentPage }) => {
       </nav>
 
       {/* Footer */}
-      <div className="p-4 border-t-2 border-purple-500/40 shadow-[0_-2px_10px_rgba(168,85,247,0.2)]">
+      <div className={`p-4 border-t-2 ${borderClass} shadow-[0_-2px_10px_var(--color-glow)]`}>
         <div className="text-xs text-dark-600 text-center">
           <p className="drop-shadow-sm">Version 1.0.0</p>
           <p className="mt-1 drop-shadow-sm">© 2025 Nether Client</p>
