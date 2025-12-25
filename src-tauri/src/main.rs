@@ -1097,19 +1097,491 @@ stats:
     Ok(server_id)
 }
 
+// Fonction pour détecter automatiquement le fichier JAR principal d'un serveur
+fn detect_main_jar(path: &std::path::PathBuf) -> Option<String> {
+    use std::fs;
+    
+    // Liste des fichiers JAR dans le dossier
+    let jar_files: Vec<_> = fs::read_dir(path)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            name.ends_with(".jar") && !name.contains("installer") && !name.contains("install")
+        })
+        .collect();
+    
+    if jar_files.is_empty() {
+        return None;
+    }
+    
+    // Priorité 1: Fichiers JAR spécifiques connus (par ordre de priorité)
+    let priority_jars = [
+        "server.jar",
+        "paper.jar",
+        "spigot.jar",
+        "bukkit.jar",
+        "craftbukkit.jar",
+    ];
+    
+    for priority_jar in &priority_jars {
+        for jar_file in &jar_files {
+            let jar_name = jar_file.file_name().to_string_lossy().to_lowercase();
+            if jar_name == *priority_jar {
+                return Some(jar_file.file_name().to_string_lossy().to_string());
+            }
+        }
+    }
+    
+    // Priorité 2: Fichiers JAR avec "server" dans le nom
+    for jar_file in &jar_files {
+        let jar_name = jar_file.file_name().to_string_lossy().to_lowercase();
+        if jar_name.contains("server") && !jar_name.contains("installer") {
+            return Some(jar_file.file_name().to_string_lossy().to_string());
+        }
+    }
+    
+    // Priorité 3: Fichiers JAR avec des noms de serveurs connus
+    let known_servers = ["forge", "neoforge", "mohist", "paper", "spigot", "bukkit", "fabric"];
+    for known_server in &known_servers {
+        for jar_file in &jar_files {
+            let jar_name = jar_file.file_name().to_string_lossy().to_lowercase();
+            if jar_name.contains(known_server) && !jar_name.contains("installer") {
+                return Some(jar_file.file_name().to_string_lossy().to_string());
+            }
+        }
+    }
+    
+    // Priorité 4: Le plus gros fichier JAR (probablement le serveur principal)
+    let mut largest_jar: Option<(String, u64)> = None;
+    for jar_file in &jar_files {
+        if let Ok(metadata) = jar_file.metadata() {
+            let size = metadata.len();
+            if let Some((_, current_size)) = &largest_jar {
+                if size > *current_size {
+                    largest_jar = Some((jar_file.file_name().to_string_lossy().to_string(), size));
+                }
+            } else {
+                largest_jar = Some((jar_file.file_name().to_string_lossy().to_string(), size));
+            }
+        }
+    }
+    
+    largest_jar.map(|(name, _)| name)
+}
+
+// Fonction pour configurer automatiquement un serveur (détecter JAR et créer/corriger start.bat)
+async fn auto_configure_server(server_path: &std::path::PathBuf, server_name: &str, ram_mb: u32) -> Result<(), String> {
+    use std::fs;
+    use std::io::Write;
+    
+    println!("🔧 Configuration automatique du serveur: {}", server_name);
+    
+    // 1. Détecter le fichier JAR principal
+    let main_jar = match detect_main_jar(server_path) {
+        Some(jar) => {
+            println!("✅ JAR principal détecté: {}", jar);
+            jar
+        }
+        None => {
+            return Err("Aucun fichier JAR valide trouvé dans le dossier du serveur".to_string());
+        }
+    };
+    
+    // 2. Détecter la version Minecraft pour obtenir le bon Java
+    let detected_version = detect_version_internal(server_path);
+    let version = if detected_version.is_empty() {
+        "1.20.1".to_string() // Version par défaut
+    } else {
+        detected_version
+    };
+    
+    println!("📦 Version détectée: {}", version);
+    
+    // 3. Corriger automatiquement la configuration réseau si nécessaire
+    let properties_path = server_path.join("server.properties");
+    if let Err(e) = fix_server_network_auto(&properties_path) {
+        println!("⚠️ Erreur lors de la correction réseau pour {}: {}", server_name, e);
+        // Continuer quand même
+    }
+    
+    // 4. Obtenir le chemin Java approprié
+    let java_path = get_java_executable_path(&version).await?;
+    println!("☕ Java sélectionné: {}", java_path);
+    
+    // 5. Vérifier si start.bat existe et le créer/corriger si nécessaire
+    let bat_path = server_path.join("start.bat");
+    let ram_gb = ram_mb / 1024;
+    let ram_gb_half = ram_gb / 2;
+    
+    // Lire le start.bat existant s'il existe pour vérifier s'il est compatible
+    let needs_update = if bat_path.exists() {
+        if let Ok(content) = fs::read_to_string(&bat_path) {
+            // Vérifier si le JAR dans le start.bat correspond au JAR détecté
+            let content_lower = content.to_lowercase();
+            let jar_lower = main_jar.to_lowercase();
+            !content_lower.contains(&jar_lower) || !content_lower.contains(&java_path.replace("\\", "/"))
+        } else {
+            true
+        }
+    } else {
+        true
+    };
+    
+    if needs_update {
+        println!("📝 Création/Mise à jour du script start.bat...");
+        
+        // Détecter le type de serveur pour les flags optimisés
+        let server_type = detect_server_type_quick(server_path);
+        let optimized_flags = get_optimized_jvm_flags(&java_path, &version, &server_type);
+        let flags_string = optimized_flags.join(" ");
+        
+        // Créer le contenu du start.bat avec les flags optimisés
+        let bat_content = format!(
+            "@echo off\n\
+             title Nether Client - {}\n\
+             echo ========================================\n\
+             echo Demarrage du serveur {}\n\
+             echo ========================================\n\
+             echo.\n\
+             echo Fichier JAR: {}\n\
+             echo Version Minecraft: {}\n\
+             echo Utilisation de Java: {}\n\
+             echo RAM allouee: {} MB ({} GB)\n\
+             echo Type de serveur: {}\n\
+             echo.\n\
+             echo [INFO] Lancement optimise du serveur...\n\
+             echo.\n\
+             \"{}\" {} -Xmx{}M -Xms{}M -jar {} nogui\n\
+             if %ERRORLEVEL% neq 0 (\n\
+                 echo.\n\
+                 echo [ERROR] Erreur lors du demarrage du serveur (Code: %ERRORLEVEL%)\n\
+                 echo Verifiez les logs ci-dessus pour plus d'informations.\n\
+             )\n\
+             echo.\n\
+             echo [INFO] Serveur arrete.\n\
+             echo Appuyez sur une touche pour fermer...\n\
+             pause >nul\n",
+            server_name,
+            server_name,
+            main_jar,
+            version,
+            java_path,
+            ram_mb,
+            ram_gb,
+            server_type,
+            java_path,
+            flags_string,
+            ram_mb,
+            ram_gb_half * 1024,
+            main_jar
+        );
+        
+        // Écrire le fichier start.bat
+        let mut bat_file = fs::File::create(&bat_path)
+            .map_err(|e| format!("Erreur création start.bat: {}", e))?;
+        bat_file.write_all(bat_content.as_bytes())
+            .map_err(|e| format!("Erreur écriture start.bat: {}", e))?;
+        
+        println!("✅ Script start.bat créé/mis à jour avec succès!");
+    } else {
+        println!("ℹ️ Script start.bat existe déjà et semble compatible");
+    }
+    
+    Ok(())
+}
+
+// Fonction pour nettoyer automatiquement les logs avant démarrage
+fn cleanup_logs_before_start(server_path: &std::path::PathBuf) -> Result<(), String> {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    
+    let logs_dir = server_path.join("logs");
+    if !logs_dir.exists() {
+        return Ok(()); // Pas de dossier logs, rien à nettoyer
+    }
+    
+    println!("🧹 Nettoyage des logs avant démarrage...");
+    
+    let current_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    
+    // Supprimer les logs plus anciens que 7 jours (sauf latest.log et crash-reports)
+    let cutoff_time = current_time - (7 * 24 * 60 * 60); // 7 jours en secondes
+    
+    let mut deleted_count = 0;
+    let mut total_freed = 0u64;
+    
+    if let Ok(entries) = fs::read_dir(&logs_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_name = path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            
+            // Ne pas supprimer latest.log ni les crash-reports
+            if file_name == "latest.log" || file_name.starts_with("crash-") {
+                continue;
+            }
+            
+            // Supprimer les anciens fichiers de logs
+            if path.is_file() && (file_name.ends_with(".log") || file_name.ends_with(".log.gz")) {
+                if let Ok(metadata) = entry.metadata() {
+                    if let Ok(modified) = metadata.modified() {
+                        if let Ok(modified_secs) = modified.duration_since(UNIX_EPOCH) {
+                            if modified_secs.as_secs() < cutoff_time {
+                                let size = metadata.len();
+                                if let Err(e) = fs::remove_file(&path) {
+                                    println!("⚠️ Erreur suppression {}: {}", file_name, e);
+                                } else {
+                                    deleted_count += 1;
+                                    total_freed += size;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    if deleted_count > 0 {
+        println!("✅ {} fichiers de logs supprimés ({} MB libérés)", deleted_count, total_freed / 1024 / 1024);
+    } else {
+        println!("ℹ️ Aucun log ancien à supprimer");
+    }
+    
+    Ok(())
+}
+
+// Fonction pour vérifier l'intégrité des fichiers critiques
+fn verify_critical_files(server_path: &std::path::PathBuf) -> Result<(), String> {
+    use std::fs;
+    
+    println!("🔍 Vérification de l'intégrité des fichiers...");
+    
+    // Vérifier que server.properties existe
+    let properties_file = server_path.join("server.properties");
+    if !properties_file.exists() {
+        return Err("server.properties non trouvé".to_string());
+    }
+    
+    // Vérifier qu'au moins un JAR existe
+    let jar_files: Vec<_> = fs::read_dir(server_path)
+        .ok()
+        .and_then(|entries| {
+            Some(entries.filter_map(|e| e.ok())
+                .filter(|e| {
+                    let name = e.file_name().to_string_lossy().to_lowercase();
+                    name.ends_with(".jar") && !name.contains("installer")
+                })
+                .collect())
+        })
+        .unwrap_or_default();
+    
+    if jar_files.is_empty() {
+        return Err("Aucun fichier JAR trouvé dans le dossier du serveur".to_string());
+    }
+    
+    println!("✅ Fichiers critiques vérifiés");
+    Ok(())
+}
+
+// Fonction pour générer les flags JVM optimisés selon la version Java
+fn get_optimized_jvm_flags(java_path: &str, _minecraft_version: &str, server_type: &str) -> Vec<String> {
+    let mut flags = Vec::new();
+    
+    // Détecter la version Java depuis le chemin
+    let java_version = if java_path.contains("jdk-21") || java_path.contains("java-21") || java_path.contains("jre-21") {
+        21
+    } else if java_path.contains("jdk-17") || java_path.contains("java-17") || java_path.contains("jre-17") {
+        17
+    } else if java_path.contains("jdk-8") || java_path.contains("java-8") || java_path.contains("jre-8") || java_path.contains("jdk1.8") {
+        8
+    } else {
+        21 // Par défaut, supposer Java 21
+    };
+    
+    println!("☕ Version Java détectée: {}", java_version);
+    
+    // Flags communs pour toutes les versions
+    flags.push("-XX:+UseG1GC".to_string());
+    flags.push("-XX:+ParallelRefProcEnabled".to_string());
+    flags.push("-XX:MaxGCPauseMillis=200".to_string());
+    flags.push("-XX:+DisableExplicitGC".to_string());
+    flags.push("-XX:+UseStringDeduplication".to_string());
+    flags.push("-XX:+OptimizeStringConcat".to_string());
+    
+    // Flags selon la version Java
+    if java_version >= 17 {
+        flags.push("-XX:+UnlockExperimentalVMOptions".to_string());
+    }
+    
+    if java_version >= 21 {
+        // Java 21+ peut utiliser ZGC pour un démarrage encore plus rapide
+        // Mais G1GC est plus stable, on garde G1GC pour l'instant
+        // flags.push("-XX:+UseZGC".to_string());
+    }
+    
+    // Flags Paper/Spigot spécifiques
+    if server_type == "paper" || server_type == "spigot" || server_type == "bukkit" {
+        flags.push("-Dpaper.playerconnection.keepalive=30".to_string());
+        flags.push("-Dpaper.disableChannelLimit=true".to_string());
+        flags.push("-Dpaper.enable-time-metrics=false".to_string());
+        flags.push("-Dpaper.debug=false".to_string());
+    }
+    
+    println!("🚀 {} flags JVM optimisés générés", flags.len());
+    flags
+}
+
+// Fonction pour détecter rapidement le type de serveur depuis le chemin
+fn detect_server_type_quick(path: &std::path::PathBuf) -> String {
+    use std::fs;
+    
+    // Vérification rapide des dossiers
+    let has_plugins = path.join("plugins").exists();
+    let has_mods = path.join("mods").exists();
+    
+    if has_plugins && has_mods {
+        return "mohist".to_string();
+    }
+    
+    if has_plugins {
+        return "paper".to_string(); // Paper/Spigot/Bukkit
+    }
+    
+    if has_mods {
+        // Vérifier le nom du JAR pour distinguer Forge/NeoForge
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                if name.contains("neoforge") {
+                    return "neoforge".to_string();
+                }
+                if name.contains("forge") {
+                    return "forge".to_string();
+                }
+            }
+        }
+        return "forge".to_string(); // Par défaut
+    }
+    
+    "vanilla".to_string()
+}
+
 // Commande pour démarrer un serveur avec capture des logs en temps réel
 #[tauri::command]
 async fn start_server(server_name: String, server_path: String) -> Result<(), String> {
     use std::path::PathBuf;
+    use tokio::task;
     
-    println!("Démarrage du serveur: {} depuis {}", server_name, server_path);
+    println!("🚀 Démarrage optimisé du serveur: {} depuis {}", server_name, server_path);
     
     let path = PathBuf::from(&server_path);
     
-    // Vérifier si le script start.bat existe
+    // ========== OPTIMISATIONS AVANT DÉMARRAGE (en parallèle) ==========
+    println!("⚡ Optimisations pré-démarrage...");
+    
+    // 1. Nettoyage automatique des logs (en parallèle avec les autres optimisations)
+    let cleanup_handle = {
+        let path_clone = path.clone();
+        task::spawn_blocking(move || {
+            cleanup_logs_before_start(&path_clone)
+        })
+    };
+    
+    // 2. Vérification de l'intégrité des fichiers (en parallèle)
+    let verify_handle = {
+        let path_clone = path.clone();
+        task::spawn_blocking(move || {
+            verify_critical_files(&path_clone)
+        })
+    };
+    
+    // 3. Détection du type de serveur (en parallèle)
+    let server_type = detect_server_type_quick(&path);
+    println!("📦 Type de serveur détecté: {}", server_type);
+    
+    // Attendre que les optimisations se terminent
+    let _ = cleanup_handle.await;
+    let _ = verify_handle.await;
+    
+    println!("✅ Optimisations pré-démarrage terminées");
+    
+    // Vérifier si le script start.bat existe, sinon le créer automatiquement
     let bat_path = path.join("start.bat");
     if !bat_path.exists() {
-        return Err(format!("Script de démarrage non trouvé: {}", bat_path.display()));
+        println!("⚠️ Script start.bat non trouvé, configuration automatique...");
+        
+        // Obtenir la RAM configurée du serveur depuis localStorage (via le frontend)
+        // Pour l'instant, utiliser une valeur par défaut de 2048 MB
+        let default_ram = 2048;
+        
+        // Configurer automatiquement le serveur
+        auto_configure_server(&path, &server_name, default_ram).await?;
+    } else {
+        // Vérifier si le start.bat est compatible, sinon le corriger
+        println!("🔍 Vérification de la compatibilité du start.bat...");
+        
+        // Détecter la version Minecraft pour vérifier la version Java
+        let detected_version = detect_version_internal(&path);
+        let version = if detected_version.is_empty() {
+            "1.20.1".to_string() // Version par défaut
+        } else {
+            detected_version
+        };
+        
+        // Obtenir la version Java recommandée pour cette version Minecraft
+        let recommended_java_version = get_recommended_java_version(&version).await?;
+        let correct_java_path = get_java_executable_path(&version).await?;
+        
+        // Détecter le JAR principal
+        if let Some(main_jar) = detect_main_jar(&path) {
+            // Lire le contenu du start.bat
+            if let Ok(content) = std::fs::read_to_string(&bat_path) {
+                let content_lower = content.to_lowercase();
+                let jar_lower = main_jar.to_lowercase();
+                
+                // Vérifier si le JAR dans le start.bat correspond
+                let jar_matches = content_lower.contains(&jar_lower);
+                
+                // Vérifier si la version Java dans le start.bat correspond
+                // Normaliser les chemins pour la comparaison (enlever les backslashes, guillemets, etc.)
+                let correct_java_normalized = correct_java_path.to_lowercase()
+                    .replace("\\", "/")
+                    .replace("\"", "");
+                let content_normalized = content_lower
+                    .replace("\\", "/")
+                    .replace("\"", "");
+                let java_matches = content_normalized.contains(&correct_java_normalized);
+                
+                // Vérifier aussi si une version Java incorrecte est utilisée (Java 17 pour 1.20.1+)
+                let has_wrong_java = if recommended_java_version == "21" {
+                    // Si Java 21 est requis, vérifier qu'il n'y a pas de Java 17 dans le start.bat
+                    content_lower.contains("jdk-17") || 
+                    content_lower.contains("jre-17") ||
+                    (content_lower.contains("java") && !content_normalized.contains("jdk-21") && !content_normalized.contains("jre-21") && !content_normalized.contains("java-21"))
+                } else {
+                    false
+                };
+                
+                // Si le JAR ou la version Java ne correspond pas, mettre à jour
+                if !jar_matches || !java_matches || has_wrong_java {
+                    println!("⚠️ Le start.bat n'est pas compatible (JAR: {}, Java: {}, Wrong Java: {}), mise à jour...", 
+                        if jar_matches { "OK" } else { "NON" },
+                        if java_matches { "OK" } else { "NON" },
+                        if has_wrong_java { "OUI" } else { "NON" }
+                    );
+                    let default_ram = 2048;
+                    auto_configure_server(&path, &server_name, default_ram).await?;
+                } else {
+                    println!("✅ Le start.bat est compatible");
+                }
+            }
+        }
     }
     
     // Initialiser les logs pour ce serveur
@@ -1118,18 +1590,73 @@ async fn start_server(server_name: String, server_path: String) -> Result<(), St
         logs.insert(server_name.clone(), Vec::new());
     }
     
-    // Démarrer le serveur avec le script .bat (fenêtre CMD stable)
-    let mut child = Command::new("cmd")
-        .args(["/K", "start.bat"])
+    // Lire le start.bat pour extraire la commande Java
+    let bat_content = std::fs::read_to_string(&bat_path)
+        .map_err(|e| format!("Erreur lecture start.bat: {}", e))?;
+    
+    // Parser le start.bat pour extraire la commande Java
+    let (java_exe, mut java_args) = parse_java_command_from_bat(&bat_content)
+        .map_err(|e| format!("Erreur parsing start.bat: {}", e))?;
+    
+    // Détecter la version Minecraft pour les flags optimisés
+    let detected_version = detect_version_internal(&path);
+    let minecraft_version = if detected_version.is_empty() {
+        "1.20.1".to_string()
+    } else {
+        detected_version
+    };
+    
+    // Générer les flags JVM optimisés
+    let optimized_flags = get_optimized_jvm_flags(&java_exe, &minecraft_version, &server_type);
+    
+    // Injecter les flags optimisés dans les arguments Java
+    // Insérer les flags avant -jar (les flags doivent être avant -jar)
+    let mut optimized_args = Vec::new();
+    let mut jar_found = false;
+    
+    for arg in &java_args {
+        if arg == "-jar" {
+            // Insérer les flags optimisés avant -jar
+            for flag in &optimized_flags {
+                // Vérifier si le flag n'existe pas déjà
+                if !java_args.contains(flag) {
+                    optimized_args.push(flag.clone());
+                }
+            }
+            jar_found = true;
+        }
+        optimized_args.push(arg.clone());
+    }
+    
+    // Si -jar n'a pas été trouvé, ajouter les flags au début
+    if !jar_found {
+        for flag in &optimized_flags {
+            if !java_args.contains(flag) {
+                optimized_args.insert(0, flag.clone());
+            }
+        }
+        // Ajouter les arguments originaux après les flags
+        optimized_args.extend(java_args);
+    }
+    
+    java_args = optimized_args;
+    
+    println!("🚀 Lancement optimisé du processus Java:");
+    println!("   Java: {}", java_exe);
+    println!("   Arguments optimisés: {:?}", java_args);
+    
+    // Lancer directement le processus Java (pas via cmd) avec les flags optimisés
+    let mut child = Command::new(&java_exe)
+        .args(&java_args)
         .current_dir(&path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Erreur démarrage serveur: {}", e))?;
+        .map_err(|e| format!("Erreur démarrage serveur Java: {}", e))?;
     
     let pid = child.id();
-    println!("Serveur démarré avec PID: {}", pid);
+    println!("✅ Serveur démarré avec PID: {} (processus Java direct)", pid);
     
     // Extraire stdin pour l'envoi de commandes
     let stdin = child.stdin.take();
@@ -1186,9 +1713,126 @@ async fn start_server(server_name: String, server_path: String) -> Result<(), St
     Ok(())
 }
 
+// Fonction pour parser le start.bat et extraire la commande Java
+fn parse_java_command_from_bat(bat_content: &str) -> Result<(String, Vec<String>), String> {
+    use regex::Regex;
+    
+    // Chercher la ligne qui contient la commande Java avec -jar
+    // Format attendu: "java.exe" ou "C:\...\java.exe" suivi de flags et -jar <jar_file>
+    let jar_pattern = Regex::new(r#"-jar\s+([^\s"]+)"#).map_err(|e| format!("Erreur regex: {}", e))?;
+    
+    // Chercher toutes les lignes qui contiennent -jar
+    for line in bat_content.lines() {
+        let line_trimmed = line.trim();
+        
+        // Ignorer les lignes de commentaire ou echo
+        if line_trimmed.starts_with("@") || 
+           line_trimmed.starts_with("echo") || 
+           line_trimmed.starts_with("if") ||
+           line_trimmed.starts_with("pause") ||
+           line_trimmed.is_empty() {
+            continue;
+        }
+        
+        // Si la ligne contient -jar, c'est probablement la commande Java
+        if line_trimmed.contains("-jar") {
+            println!("🔍 Ligne Java trouvée dans start.bat: {}", line_trimmed);
+            
+            // Extraire le JAR
+            let jar_file = if let Some(caps) = jar_pattern.captures(line_trimmed) {
+                caps.get(1).map(|m| m.as_str().to_string())
+            } else {
+                None
+            };
+            
+            if jar_file.is_none() {
+                continue; // Pas de JAR trouvé, passer à la ligne suivante
+            }
+            
+            // Extraire le chemin Java (peut être entre guillemets ou non)
+            let java_exe_pattern = Regex::new(r#""([^"]+java\.exe)"|([^\s"]+java\.exe)"#)
+                .map_err(|e| format!("Erreur regex Java: {}", e))?;
+            
+            let java_exe = if let Some(caps) = java_exe_pattern.captures(line_trimmed) {
+                caps.get(1)
+                    .or_else(|| caps.get(2))
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_else(|| {
+                        // Si pas trouvé dans les captures, chercher manuellement
+                        if line_trimmed.contains("java.exe") {
+                            let parts: Vec<&str> = line_trimmed.split_whitespace().collect();
+                            for part in parts {
+                                if part.contains("java.exe") || part.contains("javaw.exe") {
+                                    return part.trim_matches('"').to_string();
+                                }
+                            }
+                        }
+                        "java".to_string() // Fallback
+                    })
+            } else {
+                // Si pas trouvé, chercher juste "java" ou "javaw"
+                if line_trimmed.contains("java.exe") {
+                    // Extraire manuellement
+                    let parts: Vec<&str> = line_trimmed.split_whitespace().collect();
+                    for part in parts {
+                        if part.contains("java.exe") || part.contains("javaw.exe") {
+                            return Ok((part.trim_matches('"').to_string(), vec![]));
+                        }
+                    }
+                    "java".to_string() // Fallback
+                } else {
+                    "java".to_string() // Fallback
+                }
+            };
+            
+            // Extraire tous les arguments (flags Java + -jar + jar_file + nogui)
+            let mut args = Vec::new();
+            let words: Vec<&str> = line_trimmed.split_whitespace().collect();
+            let mut skip_java = false;
+            
+            for word in words {
+                let word_clean = word.trim_matches('"');
+                
+                // Ignorer le chemin Java
+                if word_clean.contains("java.exe") || word_clean.contains("javaw.exe") {
+                    skip_java = true;
+                    continue;
+                }
+                
+                if skip_java {
+                    args.push(word_clean.to_string());
+                }
+            }
+            
+            // Si pas d'arguments extraits, utiliser une extraction plus simple
+            if args.is_empty() {
+                // Essayer d'extraire tout après le chemin Java
+                if let Some(java_pos) = line_trimmed.find("java.exe") {
+                    let after_java = &line_trimmed[java_pos + 8..];
+                    let parts: Vec<&str> = after_java.split_whitespace().collect();
+                    for part in parts {
+                        let clean = part.trim_matches('"');
+                        if !clean.is_empty() {
+                            args.push(clean.to_string());
+                        }
+                    }
+                }
+            }
+            
+            println!("✅ Commande Java extraite: {} {:?}", java_exe, args);
+            return Ok((java_exe, args));
+        }
+    }
+    
+    Err("Aucune commande Java trouvée dans start.bat".to_string())
+}
+
 // Commande pour arrêter un serveur
 #[tauri::command]
 async fn stop_server(server_name: String) -> Result<(), String> {
+    use std::path::PathBuf;
+    use std::env;
+    
     println!("Arrêt du serveur: {}", server_name);
     
     // Récupérer le processus depuis le gestionnaire global
@@ -1198,6 +1842,8 @@ async fn stop_server(server_name: String) -> Result<(), String> {
     };
     
     if let Some(mut server_process) = server_process {
+        let pid = server_process.child.id();
+        
         // Envoyer la commande "stop" au serveur
         if let Some(mut stdin) = server_process.stdin.take() {
             let _ = stdin.write_all(b"stop\n");
@@ -1223,9 +1869,76 @@ async fn stop_server(server_name: String) -> Result<(), String> {
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                 }
                 Err(e) => {
-                    return Err(format!("Erreur lors de l'arrêt: {}", e));
+                    println!("Erreur lors de l'attente: {}, arrêt forcé", e);
+                    let _ = server_process.child.kill();
+                    break;
                 }
             }
+        }
+        
+        // Attendre un peu pour que le processus se termine complètement
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        
+        // Tuer tous les processus Java associés au serveur (au cas où il y aurait des processus enfants)
+        #[cfg(target_os = "windows")]
+        {
+            // Obtenir le chemin du serveur
+            let server_path = {
+                let app_data = env::var("APPDATA").unwrap_or_else(|_| "".to_string());
+                PathBuf::from(&app_data)
+                    .join("NetherClient")
+                    .join("Serveurs")
+                    .join(&server_name)
+            };
+            
+            // Tuer tous les processus Java qui ont le répertoire de travail du serveur
+            let output = Command::new("tasklist")
+                .args(["/FO", "CSV", "/NH"])
+                .output();
+            
+            if let Ok(output) = output {
+                let output_str = String::from_utf8_lossy(&output.stdout);
+                for line in output_str.lines() {
+                    if line.contains("java.exe") || line.contains("javaw.exe") {
+                        let parts: Vec<&str> = line.split(',').collect();
+                        if parts.len() > 1 {
+                            if let Ok(java_pid) = parts[1].trim_matches('"').parse::<u32>() {
+                                // Vérifier si c'est le processus du serveur ou un processus enfant
+                                if java_pid == pid {
+                                    // C'est le processus principal, déjà tué
+                                    continue;
+                                }
+                                
+                                // Vérifier si le processus Java a le répertoire de travail du serveur
+                                let wmic_output = Command::new("wmic")
+                                    .args([
+                                        "process",
+                                        "where",
+                                        &format!("ProcessId={}", java_pid),
+                                        "get",
+                                        "ExecutablePath,CommandLine"
+                                    ])
+                                    .output();
+                                
+                                if let Ok(wmic_output) = wmic_output {
+                                    let wmic_str = String::from_utf8_lossy(&wmic_output.stdout);
+                                    if wmic_str.contains(server_path.to_string_lossy().as_ref()) {
+                                        println!("Tuer le processus Java enfant: {}", java_pid);
+                                        let _ = Command::new("taskkill")
+                                            .args(["/F", "/PID", &java_pid.to_string()])
+                                            .output();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Tuer aussi le processus principal s'il est encore en cours
+            let _ = Command::new("taskkill")
+                .args(["/F", "/PID", &pid.to_string()])
+                .output();
         }
         
         Ok(())
@@ -1483,7 +2196,8 @@ async fn send_notification(title: String, body: String) -> Result<(), String> {
 // Commande pour obtenir les informations système
 #[tauri::command]
 async fn get_system_info() -> Result<serde_json::Value, String> {
-    use sysinfo::System;
+    use sysinfo::{System, Disks};
+    use std::process::Command;
     
     let mut sys = System::new_all();
     sys.refresh_all();
@@ -1501,29 +2215,124 @@ async fn get_system_info() -> Result<serde_json::Value, String> {
     let used_ram = sys.used_memory() / 1024 / 1024;
     let available_ram = total_ram - used_ram;
     
-    // Informations disque (valeurs par défaut pour l'instant)
-    // La détection du disque nécessite une version plus récente de sysinfo
-    let total_disk: u64 = 512000; // 500 GB par défaut
-    let used_disk: u64 = 256000; // 250 GB par défaut
-    let available_disk: u64 = 256000; // 250 GB par défaut
-    
     // Informations OS
     let os_name = System::name().unwrap_or_else(|| "Windows".to_string());
     let os_version = System::os_version().unwrap_or_else(|| "10".to_string());
     let arch = std::env::consts::ARCH;
     
+    // Détecter l'édition de Windows (Pro, Home, Enterprise, etc.)
+    let os_edition = {
+        #[cfg(target_os = "windows")]
+        {
+            let mut edition = "Standard".to_string();
+            
+            // Essayer d'abord avec la clé de registre (plus fiable)
+            if let Ok(output) = Command::new("reg")
+                .args([
+                    "query",
+                    "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+                    "/v",
+                    "EditionID"
+                ])
+                .output()
+            {
+                let output_str = String::from_utf8_lossy(&output.stdout);
+                if let Some(edition_line) = output_str.lines().find(|l| l.contains("EditionID")) {
+                    if let Some(edition_part) = edition_line.split_whitespace().last() {
+                        edition = match edition_part {
+                            "Professional" | "Pro" => "Pro".to_string(),
+                            "Home" | "Core" | "CoreSingleLanguage" => "Famille".to_string(),
+                            "Enterprise" => "Entreprise".to_string(),
+                            "Education" => "Éducation".to_string(),
+                            "ServerStandard" | "ServerDatacenter" => "Serveur".to_string(),
+                            _ => edition_part.to_string(),
+                        };
+                    }
+                }
+            }
+            
+            // Si pas trouvé, essayer avec systeminfo
+            if edition == "Standard" {
+                if let Ok(output) = Command::new("systeminfo")
+                    .output()
+                {
+                    let output_str = String::from_utf8_lossy(&output.stdout);
+                    for line in output_str.lines() {
+                        if line.contains("OS Name") || line.contains("Système d'exploitation") {
+                            // Extraire l'édition depuis la ligne
+                            let line_lower = line.to_lowercase();
+                            if line_lower.contains("pro") {
+                                edition = "Pro".to_string();
+                            } else if line_lower.contains("home") {
+                                edition = "Famille".to_string();
+                            } else if line_lower.contains("enterprise") {
+                                edition = "Entreprise".to_string();
+                            } else if line_lower.contains("education") {
+                                edition = "Éducation".to_string();
+                            } else if line_lower.contains("server") {
+                                edition = "Serveur".to_string();
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            edition
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            "Standard".to_string()
+        }
+    };
+    
+    // Détecter l'espace disque sur tous les disques
+    let mut disks_info = Vec::new();
+    let mut total_disk_space: u64 = 0;
+    let mut total_disk_used: u64 = 0;
+    let mut total_disk_free: u64 = 0;
+    
+    let disks = Disks::new_with_refreshed_list();
+    for disk in disks.list() {
+        let mount_point = disk.mount_point().to_string_lossy().to_string();
+        let total_space = disk.total_space() / 1024 / 1024; // MB
+        let available_space = disk.available_space() / 1024 / 1024; // MB
+        let used_space = total_space - available_space;
+        
+        total_disk_space += total_space;
+        total_disk_used += used_space;
+        total_disk_free += available_space;
+        
+        disks_info.push(serde_json::json!({
+            "mountPoint": mount_point,
+            "totalSpace": total_space,
+            "usedSpace": used_space,
+            "freeSpace": available_space,
+            "name": disk.name().to_string_lossy().to_string(),
+        }));
+    }
+    
+    // Si aucun disque détecté, utiliser des valeurs par défaut
+    if disks_info.is_empty() {
+        total_disk_space = 512000; // 500 GB par défaut
+        total_disk_used = 256000; // 250 GB par défaut
+        total_disk_free = 256000; // 250 GB par défaut
+    }
+    
     let info = serde_json::json!({
         "os": os_name,
         "osVersion": os_version,
+        "osEdition": os_edition,
         "arch": arch,
         "cpu": cpu_brand,
         "cpuCores": cpu_count,
         "totalRam": total_ram,
         "availableRam": available_ram,
         "usedRam": used_ram,
-        "totalDisk": total_disk,
-        "usedDisk": used_disk,
-        "freeDisk": available_disk,
+        "totalDisk": total_disk_space,
+        "usedDisk": total_disk_used,
+        "freeDisk": total_disk_free,
+        "disks": disks_info,
     });
     
     Ok(info)
@@ -1845,6 +2654,149 @@ async fn clear_server_logs(server_name: String) -> Result<(), String> {
     Ok(())
 }
 
+// Commande pour mettre à jour la RAM dans le start.bat d'un serveur
+#[tauri::command]
+async fn update_server_ram(server_name: String, server_path: String, ram_mb: u32) -> Result<bool, String> {
+    use std::path::PathBuf;
+    use std::fs;
+    use regex::Regex;
+    
+    println!("🔍 Vérification et mise à jour de la RAM pour le serveur: {} ({} MB)", server_name, ram_mb);
+    
+    let path = PathBuf::from(&server_path);
+    let bat_path = path.join("start.bat");
+    
+    if !bat_path.exists() {
+        println!("⚠️ start.bat non trouvé, création automatique...");
+        // Utiliser auto_configure_server pour créer le start.bat
+        auto_configure_server(&path, &server_name, ram_mb).await?;
+        return Ok(true);
+    }
+    
+    // Lire le contenu actuel du start.bat
+    let content = fs::read_to_string(&bat_path)
+        .map_err(|e| format!("Erreur lecture start.bat: {}", e))?;
+    
+    // Extraire la RAM actuelle depuis -Xmx
+    let xmx_pattern = Regex::new(r"-Xmx(\d+)([MG])").map_err(|e| format!("Erreur regex: {}", e))?;
+    let xms_pattern = Regex::new(r"-Xms(\d+)([MG])").map_err(|e| format!("Erreur regex: {}", e))?;
+    
+    let mut current_ram_mb: Option<u32> = None;
+    
+    // Chercher -Xmx dans le contenu
+    if let Some(caps) = xmx_pattern.captures(&content) {
+        if let (Some(amount_str), Some(unit)) = (caps.get(1), caps.get(2)) {
+            if let Ok(amount) = amount_str.as_str().parse::<u32>() {
+                let unit_str = unit.as_str();
+                current_ram_mb = Some(if unit_str == "G" {
+                    amount * 1024
+                } else {
+                    amount
+                });
+            }
+        }
+    }
+    
+    // Vérifier si la RAM doit être mise à jour
+    let needs_update = match current_ram_mb {
+        Some(current) => {
+            if current != ram_mb {
+                println!("📊 RAM actuelle dans start.bat: {} MB, RAM configurée: {} MB → Mise à jour nécessaire", current, ram_mb);
+                true
+            } else {
+                println!("✅ RAM déjà correcte dans start.bat: {} MB", ram_mb);
+                false
+            }
+        }
+        None => {
+            println!("⚠️ Impossible de détecter la RAM actuelle dans start.bat → Mise à jour nécessaire");
+            true
+        }
+    };
+    
+    if !needs_update {
+        return Ok(false);
+    }
+    
+    // Mettre à jour le start.bat avec la nouvelle RAM
+    println!("📝 Mise à jour du start.bat avec {} MB de RAM...", ram_mb);
+    
+    // Détecter le JAR principal et la version
+    let main_jar = detect_main_jar(&path)
+        .unwrap_or_else(|| "server.jar".to_string());
+    let detected_version = detect_version_internal(&path);
+    let version = if detected_version.is_empty() {
+        "1.20.1".to_string()
+    } else {
+        detected_version
+    };
+    
+    // Obtenir le chemin Java approprié
+    let java_path = get_java_executable_path(&version).await?;
+    
+    let ram_gb = ram_mb / 1024;
+    let ram_gb_half = ram_gb / 2;
+    
+    // Remplacer les valeurs -Xmx et -Xms dans le contenu
+    let updated_content = xmx_pattern.replace_all(&content, |_caps: &regex::Captures| {
+        format!("-Xmx{}M", ram_mb)
+    });
+    
+    let updated_content = xms_pattern.replace_all(&updated_content.as_ref(), |_caps: &regex::Captures| {
+        format!("-Xms{}M", ram_gb_half * 1024)
+    });
+    
+    // Si les patterns n'ont pas été trouvés, recréer le start.bat complètement
+    let final_content = if updated_content == content {
+        println!("⚠️ Patterns -Xmx/-Xms non trouvés, recréation complète du start.bat...");
+        format!(
+            "@echo off\n\
+             title Nether Client - {}\n\
+             echo ========================================\n\
+             echo Demarrage du serveur {}\n\
+             echo ========================================\n\
+             echo.\n\
+             echo Fichier JAR: {}\n\
+             echo Version Minecraft: {}\n\
+             echo Utilisation de Java: {}\n\
+             echo RAM allouee: {} MB ({} GB)\n\
+             echo.\n\
+             echo [INFO] Lancement du serveur...\n\
+             echo.\n\
+             \"{}\" -Xmx{}M -Xms{}M -jar {} nogui\n\
+             if %ERRORLEVEL% neq 0 (\n\
+                 echo.\n\
+                 echo [ERROR] Erreur lors du demarrage du serveur (Code: %ERRORLEVEL%)\n\
+                 echo Verifiez les logs ci-dessus pour plus d'informations.\n\
+             )\n\
+             echo.\n\
+             echo [INFO] Serveur arrete.\n\
+             echo Appuyez sur une touche pour fermer...\n\
+             pause >nul\n",
+            server_name,
+            server_name,
+            main_jar,
+            version,
+            java_path,
+            ram_mb,
+            ram_gb,
+            java_path,
+            ram_mb,
+            ram_gb_half * 1024,
+            main_jar
+        )
+    } else {
+        updated_content.to_string()
+    };
+    
+    // Écrire le fichier mis à jour
+    fs::write(&bat_path, final_content)
+        .map_err(|e| format!("Erreur écriture start.bat: {}", e))?;
+    
+    println!("✅ start.bat mis à jour avec succès avec {} MB de RAM", ram_mb);
+    Ok(true)
+}
+
 // Commande pour corriger le script start.bat d'un serveur existant
 #[tauri::command]
 async fn fix_server_start_script(server_name: String) -> Result<(), String> {
@@ -1890,12 +2842,162 @@ async fn fix_server_start_script(server_name: String) -> Result<(), String> {
     Ok(())
 }
 
+// Fonction interne pour vérifier si une IP est invalide (publique ou non locale)
+fn is_invalid_server_ip(ip: &str) -> bool {
+    let ip = ip.trim();
+    
+    // Si vide ou déjà 0.0.0.0, c'est valide
+    if ip.is_empty() || ip == "0.0.0.0" {
+        return false;
+    }
+    
+    // Parser l'IP
+    let parts: Vec<&str> = ip.split('.').collect();
+    if parts.len() != 4 {
+        return true; // Format invalide
+    }
+    
+    // Vérifier que chaque partie est un nombre valide
+    let mut octets = Vec::new();
+    for part in parts {
+        match part.parse::<u8>() {
+            Ok(octet) => octets.push(octet),
+            Err(_) => return true, // Format invalide
+        }
+    }
+    
+    // Vérifier si c'est une IP privée/localhost
+    // 127.x.x.x (localhost)
+    if octets[0] == 127 {
+        return false;
+    }
+    
+    // 10.x.x.x (privée)
+    if octets[0] == 10 {
+        return false;
+    }
+    
+    // 172.16.x.x - 172.31.x.x (privée)
+    if octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31 {
+        return false;
+    }
+    
+    // 192.168.x.x (privée)
+    if octets[0] == 192 && octets[1] == 168 {
+        return false;
+    }
+    
+    // Si ce n'est aucune des IPs privées ci-dessus, c'est probablement une IP publique invalide
+    true
+}
+
+// Fonction interne pour corriger automatiquement la configuration réseau d'un serveur
+fn fix_server_network_auto(properties_path: &std::path::PathBuf) -> Result<bool, String> {
+    use std::fs;
+    
+    if !properties_path.exists() {
+        return Ok(false); // Pas de fichier, rien à corriger
+    }
+    
+    // Lire le fichier existant
+    let content = fs::read_to_string(properties_path)
+        .map_err(|e| format!("Erreur lecture properties: {}", e))?;
+    
+    let mut needs_fix = false;
+    let lines: Vec<&str> = content.lines().collect();
+    let mut new_lines = Vec::new();
+    let mut has_port_line = false;
+    
+    for line in lines {
+        if line.starts_with("server-ip=") {
+            // Extraire l'IP actuelle
+            if let Some(ip_value) = line.split('=').nth(1) {
+                let ip = ip_value.trim();
+                
+                // Vérifier si l'IP est invalide
+                if is_invalid_server_ip(ip) {
+                    println!("⚠️ IP invalide détectée dans server.properties: {} -> correction automatique", ip);
+                    new_lines.push("server-ip="); // Valeur vide = 0.0.0.0 par défaut
+                    needs_fix = true;
+                } else {
+                    new_lines.push(line); // IP valide, garder telle quelle
+                }
+            } else {
+                new_lines.push(line);
+            }
+        } else if line.starts_with("server-port=") {
+            has_port_line = true;
+            // Extraire le port actuel
+            if let Some(port_value) = line.split('=').nth(1) {
+                let port_str = port_value.trim();
+                
+                // Vérifier si le port est valide (entre 1024 et 65535)
+                // Note: u16::MAX == 65535, donc port <= 65535 est toujours vrai pour u16
+                let is_valid_port = if let Ok(port) = port_str.parse::<u16>() {
+                    port >= 1024
+                } else {
+                    false
+                };
+                
+                if !is_valid_port || port_str.is_empty() {
+                    println!("⚠️ Port invalide ou manquant dans server.properties: {} -> correction automatique (25565)", port_str);
+                    new_lines.push("server-port=25565");
+                    needs_fix = true;
+                } else {
+                    new_lines.push(line); // Port valide, garder tel quel
+                }
+            } else {
+                // Pas de valeur après le =, mettre le port par défaut
+                println!("⚠️ Port non défini dans server.properties -> correction automatique (25565)");
+                new_lines.push("server-port=25565");
+                needs_fix = true;
+            }
+        } else {
+            new_lines.push(line);
+        }
+    }
+    
+    // Si le port n'existe pas du tout, l'ajouter après server-ip
+    if !has_port_line {
+        println!("⚠️ Ligne server-port manquante dans server.properties -> ajout automatique (25565)");
+        let mut found_ip = false;
+        let mut final_lines = Vec::new();
+        
+        for line in &new_lines {
+            final_lines.push(*line);
+            if line.starts_with("server-ip=") && !found_ip {
+                final_lines.push("server-port=25565");
+                found_ip = true;
+            }
+        }
+        
+        // Si on n'a pas trouvé server-ip, ajouter les deux lignes au début
+        if !found_ip {
+            final_lines.insert(0, "server-ip=");
+            final_lines.insert(1, "server-port=25565");
+        }
+        
+        new_lines = final_lines;
+        needs_fix = true;
+    }
+    
+    // Si une correction est nécessaire, écrire le fichier
+    if needs_fix {
+        let new_content = new_lines.join("\n");
+        fs::write(properties_path, new_content)
+            .map_err(|e| format!("Erreur écriture properties: {}", e))?;
+        println!("✅ Configuration réseau corrigée automatiquement");
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 // Commande pour corriger la configuration réseau d'un serveur existant
 #[tauri::command]
 async fn fix_server_network(server_name: String) -> Result<(), String> {
     use std::env;
     use std::path::PathBuf;
-    use std::fs;
     
     let app_data = env::var("APPDATA").map_err(|e| e.to_string())?;
     let server_path = PathBuf::from(&app_data)
@@ -1909,33 +3011,8 @@ async fn fix_server_network(server_name: String) -> Result<(), String> {
         return Err(format!("Fichier server.properties non trouvé pour le serveur {}", server_name));
     }
     
-    // Lire le fichier existant
-    let mut content = fs::read_to_string(&properties_path)
-        .map_err(|e| format!("Erreur lecture properties: {}", e))?;
-    
-    // Corriger l'IP du serveur
-    if content.contains("server-ip=") {
-        // Remplacer l'IP existante par 0.0.0.0
-        let lines: Vec<&str> = content.lines().collect();
-        let mut new_lines = Vec::new();
-        
-        for line in lines {
-            if line.starts_with("server-ip=") {
-                new_lines.push("server-ip=0.0.0.0");
-            } else {
-                new_lines.push(line);
-            }
-        }
-        
-        content = new_lines.join("\n");
-    } else {
-        // Ajouter la ligne si elle n'existe pas
-        content = format!("{}\nserver-ip=0.0.0.0", content);
-    }
-    
-    // Écrire le fichier corrigé
-    fs::write(&properties_path, content)
-        .map_err(|e| format!("Erreur écriture properties: {}", e))?;
+    // Utiliser la fonction automatique
+    fix_server_network_auto(&properties_path)?;
     
     println!("Configuration réseau corrigée pour le serveur: {}", server_name);
     Ok(())
@@ -2017,20 +3094,75 @@ struct ServerStats {
 #[tauri::command]
 async fn get_server_stats(server_name: String) -> Result<ServerStats, String> {
     use sysinfo::{System, Pid};
+    use std::path::PathBuf;
     
     let processes = SERVER_PROCESSES.lock().unwrap();
     
     if let Some(server_process) = processes.get(&server_name) {
-        let pid = server_process.child.id();
+        let cmd_pid = server_process.child.id();
         
         let mut sys = System::new_all();
         sys.refresh_all();
         
-        if let Some(process) = sys.process(Pid::from_u32(pid)) {
-            let cpu_usage = process.cpu_usage();
-            let memory_usage = process.memory();
+        // Obtenir le chemin du serveur depuis le nom
+        let server_path = {
+            use std::env;
+            let app_data = env::var("APPDATA").unwrap_or_else(|_| "".to_string());
+            PathBuf::from(&app_data)
+                .join("NetherClient")
+                .join("Serveurs")
+                .join(&server_name)
+        };
+        
+        // Chercher le processus Java associé au serveur
+        let mut java_process: Option<&sysinfo::Process> = None;
+        let mut max_memory = 0u64;
+        
+        // Parcourir tous les processus pour trouver le processus Java
+        for (_pid, process) in sys.processes() {
+            let process_name = process.name().to_lowercase();
+            
+            // Vérifier si c'est un processus Java
+            if process_name.contains("java") || process_name == "javaw.exe" || process_name == "java.exe" {
+                // Vérifier si le processus correspond au serveur
+                // En vérifiant le répertoire de travail ou les arguments de ligne de commande
+                let _exe_path = process.exe();
+                let cmd_line = process.cmd();
+                
+                // Vérifier si le répertoire de travail correspond au serveur
+                if let Some(cwd) = process.cwd() {
+                    if cwd == server_path {
+                        let mem = process.memory();
+                        if mem > max_memory {
+                            max_memory = mem;
+                            java_process = Some(process);
+                        }
+                    }
+                }
+                
+                // Vérifier aussi dans les arguments de ligne de commande
+                for arg in cmd_line {
+                    let arg_str = arg.as_str();
+                    if arg_str.contains(&server_name) || 
+                       arg_str.contains(server_path.to_string_lossy().as_ref()) {
+                        let mem = process.memory();
+                        if mem > max_memory {
+                            max_memory = mem;
+                            java_process = Some(process);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Si on a trouvé un processus Java, utiliser ses statistiques
+        if let Some(java_proc) = java_process {
+            let cpu_usage = java_proc.cpu_usage();
+            let memory_usage = java_proc.memory();
             let memory_total = sys.total_memory();
-            let uptime = process.run_time();
+            let uptime = java_proc.run_time();
+            
+            println!("✅ Statistiques Java trouvées pour {}: RAM = {} KB", server_name, memory_usage / 1024);
             
             Ok(ServerStats {
                 cpu_usage,
@@ -2039,7 +3171,23 @@ async fn get_server_stats(server_name: String) -> Result<ServerStats, String> {
                 uptime,
             })
         } else {
-            Err(format!("Processus {} non trouvé dans le système", pid))
+            // Fallback: utiliser le processus cmd si Java n'est pas trouvé
+            if let Some(process) = sys.process(Pid::from_u32(cmd_pid)) {
+                println!("⚠️ Processus Java non trouvé pour {}, utilisation du processus cmd", server_name);
+                let cpu_usage = process.cpu_usage();
+                let memory_usage = process.memory();
+                let memory_total = sys.total_memory();
+                let uptime = process.run_time();
+                
+                Ok(ServerStats {
+                    cpu_usage,
+                    memory_usage,
+                    memory_total,
+                    uptime,
+                })
+            } else {
+                Err(format!("Processus {} non trouvé dans le système", cmd_pid))
+            }
         }
     } else {
         Err(format!("Serveur {} non trouvé ou arrêté", server_name))
@@ -2787,8 +3935,20 @@ async fn get_recommended_java_version(minecraft_version: &str) -> Result<String,
                 if major > 1 || (major == 1 && minor >= 21) {
                     return Ok("21".to_string());
                 }
-                // Minecraft 1.17-1.20 nécessite Java 17+
-                else if major > 1 || (major == 1 && minor >= 17) {
+                // Minecraft 1.20.1+ nécessite Java 21 (nouveau bundler)
+                else if major == 1 && minor == 20 {
+                    if version_parts.len() >= 3 {
+                        if let Ok(patch) = version_parts[2].parse::<i32>() {
+                            if patch >= 1 {
+                                return Ok("21".to_string());
+                            }
+                        }
+                    }
+                    // 1.20.0 et antérieur utilise Java 17
+                    return Ok("17".to_string());
+                }
+                // Minecraft 1.17-1.20.0 nécessite Java 17+
+                else if major == 1 && minor >= 17 {
                     return Ok("17".to_string());
                 }
                 // Minecraft 1.16 et antérieur fonctionne avec Java 8+
@@ -3846,18 +5006,81 @@ async fn start_playit(port: u16) -> Result<String, String> {
 async fn stop_playit() -> Result<(), String> {
     println!("Arrêt de Playit.gg...");
     
+    // Récupérer le PID du processus stocké avant de le nettoyer
+    let stored_pid = {
+        let process = PLAYIT_PROCESS.lock().unwrap();
+        if let Some(ref child) = *process {
+            Some(child.id())
+        } else {
+            None
+        }
+    };
+    
     // Tuer tous les processus playit.exe
     #[cfg(target_os = "windows")]
     {
+        // Tuer tous les processus playit.exe
         let _ = Command::new("taskkill")
             .args(["/F", "/IM", "playit.exe"])
             .output();
+        
+        // Tuer aussi le processus stocké s'il existe
+        if let Some(pid) = stored_pid {
+            let _ = Command::new("taskkill")
+                .args(["/F", "/PID", &pid.to_string()])
+                .output();
+        }
+        
+        // Tuer tous les processus cmd.exe qui pourraient être associés à playit
+        // (au cas où playit aurait été lancé via cmd)
+        let output = Command::new("tasklist")
+            .args(["/FO", "CSV", "/NH"])
+            .output();
+        
+        if let Ok(output) = output {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            for line in output_str.lines() {
+                if line.contains("cmd.exe") {
+                    let parts: Vec<&str> = line.split(',').collect();
+                    if parts.len() > 1 {
+                        if let Ok(cmd_pid) = parts[1].trim_matches('"').parse::<u32>() {
+                            // Vérifier si le processus cmd a playit dans sa ligne de commande
+                            let wmic_output = Command::new("wmic")
+                                .args([
+                                    "process",
+                                    "where",
+                                    &format!("ProcessId={}", cmd_pid),
+                                    "get",
+                                    "CommandLine"
+                                ])
+                                .output();
+                            
+                            if let Ok(wmic_output) = wmic_output {
+                                let wmic_str = String::from_utf8_lossy(&wmic_output.stdout);
+                                if wmic_str.to_lowercase().contains("playit") {
+                                    println!("Tuer le processus cmd.exe associé à Playit: {}", cmd_pid);
+                                    let _ = Command::new("taskkill")
+                                        .args(["/F", "/PID", &cmd_pid.to_string()])
+                                        .output();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Attendre un peu pour que les processus se terminent complètement
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
     
     // Nettoyer le processus stocké
     {
         let mut process = PLAYIT_PROCESS.lock().unwrap();
-        *process = None;
+        if let Some(mut child) = process.take() {
+            // Essayer de tuer le processus si il est encore en cours
+            let _ = child.kill();
+        }
     }
     
     // Réinitialiser l'URL du tunnel
@@ -4463,6 +5686,433 @@ fn detect_version_internal(path: &std::path::PathBuf) -> String {
     version
 }
 
+// Structure pour stocker les scores de détection
+#[derive(Debug, Clone)]
+struct ServerTypeScores {
+    vanilla: i32,
+    paper: i32,
+    forge: i32,
+    neoforge: i32,
+    mohist: i32,
+}
+
+impl ServerTypeScores {
+    fn new() -> Self {
+        ServerTypeScores {
+            vanilla: 0,
+            paper: 0,
+            forge: 0,
+            neoforge: 0,
+            mohist: 0,
+        }
+    }
+    
+    fn get_best_type(&self) -> String {
+        let mut best_type = "vanilla";
+        let mut best_score = self.vanilla;
+        
+        if self.mohist > best_score {
+            best_score = self.mohist;
+            best_type = "mohist";
+        }
+        if self.neoforge > best_score {
+            best_score = self.neoforge;
+            best_type = "neoforge";
+        }
+        if self.forge > best_score {
+            best_score = self.forge;
+            best_type = "forge";
+        }
+        if self.paper > best_score {
+            best_score = self.paper;
+            best_type = "paper";
+        }
+        
+        // best_score est utilisé pour les comparaisons mais pas pour le retour final
+        let _ = best_score; // Marquer comme utilisé pour éviter le warning
+        
+        best_type.to_string()
+    }
+}
+
+// Fonction complète de détection de type de serveur avec système de score/confiance
+fn detect_server_type_advanced(path: &std::path::PathBuf) -> String {
+    use std::fs;
+    use std::io::{BufRead, BufReader};
+    
+    let mut scores = ServerTypeScores::new();
+    let has_plugins = path.join("plugins").exists();
+    let has_mods = path.join("mods").exists();
+    let config_path = path.join("config");
+    
+    // ========== MÉTHODE 1: Présence de plugins ET mods (Mohist uniquement) ==========
+    if has_plugins && has_mods {
+        scores.mohist += 10; // Score très élevé car caractéristique unique de Mohist
+        println!("🔍 [Détection] plugins/ + mods/ détectés → +10 Mohist");
+    }
+    
+    // ========== MÉTHODE 2: Analyse du fichier start.bat ==========
+    let bat_path = path.join("start.bat");
+    if bat_path.exists() {
+        if let Ok(bat_content) = fs::read_to_string(&bat_path) {
+            let bat_content_lower = bat_content.to_lowercase();
+            
+            if bat_content_lower.contains("mohist") {
+                scores.mohist += 8;
+                println!("🔍 [Détection] start.bat contient 'mohist' → +8 Mohist");
+            }
+            if bat_content_lower.contains("magma") {
+                scores.mohist += 7; // Magma est similaire à Mohist
+                println!("🔍 [Détection] start.bat contient 'magma' → +7 Mohist");
+            }
+            if bat_content_lower.contains("arclight") {
+                scores.mohist += 7; // Arclight est similaire à Mohist
+                println!("🔍 [Détection] start.bat contient 'arclight' → +7 Mohist");
+            }
+            if bat_content_lower.contains("catserver") {
+                scores.mohist += 7; // Catserver est similaire à Mohist
+                println!("🔍 [Détection] start.bat contient 'catserver' → +7 Mohist");
+            }
+            if bat_content_lower.contains("neoforge") {
+                scores.neoforge += 8;
+                println!("🔍 [Détection] start.bat contient 'neoforge' → +8 NeoForge");
+            }
+            if bat_content_lower.contains("forge") && !bat_content_lower.contains("neoforge") && !bat_content_lower.contains("mohist") {
+                scores.forge += 8;
+                println!("🔍 [Détection] start.bat contient 'forge' → +8 Forge");
+            }
+            if bat_content_lower.contains("paper") {
+                scores.paper += 8;
+                println!("🔍 [Détection] start.bat contient 'paper' → +8 Paper");
+            }
+            if bat_content_lower.contains("spigot") {
+                scores.paper += 7; // Spigot est traité comme Paper
+                println!("🔍 [Détection] start.bat contient 'spigot' → +7 Paper");
+            }
+            if bat_content_lower.contains("bukkit") || bat_content_lower.contains("craftbukkit") {
+                scores.paper += 6; // Bukkit est traité comme Paper
+                println!("🔍 [Détection] start.bat contient 'bukkit' → +6 Paper");
+            }
+        }
+    }
+    
+    // ========== MÉTHODE 3: Analyse des noms de fichiers JAR ==========
+    let jar_files: Vec<_> = fs::read_dir(path)
+        .ok()
+        .and_then(|entries| {
+            Some(entries.filter_map(|e| e.ok())
+                .filter(|e| {
+                    let name = e.file_name().to_string_lossy().to_lowercase();
+                    name.ends_with(".jar") && !name.contains("installer") && !name.contains("install")
+                })
+                .collect())
+        })
+        .unwrap_or_default();
+    
+    for jar_file in &jar_files {
+        let jar_name = jar_file.file_name().to_string_lossy().to_lowercase();
+        
+        if jar_name.contains("mohist") {
+            scores.mohist += 10; // Score très élevé
+            println!("🔍 [Détection] JAR '{}' contient 'mohist' → +10 Mohist", jar_name);
+        }
+        if jar_name.contains("magma") {
+            scores.mohist += 9;
+            println!("🔍 [Détection] JAR '{}' contient 'magma' → +9 Mohist", jar_name);
+        }
+        if jar_name.contains("arclight") {
+            scores.mohist += 9;
+            println!("🔍 [Détection] JAR '{}' contient 'arclight' → +9 Mohist", jar_name);
+        }
+        if jar_name.contains("catserver") {
+            scores.mohist += 9;
+            println!("🔍 [Détection] JAR '{}' contient 'catserver' → +9 Mohist", jar_name);
+        }
+        if jar_name.contains("neoforge") {
+            scores.neoforge += 10;
+            println!("🔍 [Détection] JAR '{}' contient 'neoforge' → +10 NeoForge", jar_name);
+        }
+        if jar_name.contains("forge") && !jar_name.contains("neoforge") && !jar_name.contains("mohist") {
+            scores.forge += 10;
+            println!("🔍 [Détection] JAR '{}' contient 'forge' → +10 Forge", jar_name);
+        }
+        if jar_name.contains("paper") {
+            scores.paper += 10;
+            println!("🔍 [Détection] JAR '{}' contient 'paper' → +10 Paper", jar_name);
+        }
+        if jar_name.contains("spigot") {
+            scores.paper += 9; // Spigot est traité comme Paper
+            println!("🔍 [Détection] JAR '{}' contient 'spigot' → +9 Paper", jar_name);
+        }
+        if jar_name.contains("bukkit") || jar_name.contains("craftbukkit") {
+            scores.paper += 8; // Bukkit est traité comme Paper
+            println!("🔍 [Détection] JAR '{}' contient 'bukkit' → +8 Paper", jar_name);
+        }
+    }
+    
+    // ========== MÉTHODE 4: Analyse des logs (latest.log) ==========
+    let logs_path = path.join("logs");
+    let latest_log = logs_path.join("latest.log");
+    if latest_log.exists() {
+        if let Ok(file) = fs::File::open(&latest_log) {
+            let reader = BufReader::new(file);
+            let mut line_count = 0;
+            for line_result in reader.lines() {
+                if line_count > 200 { break; } // Limiter à 200 premières lignes
+                if let Ok(line) = line_result {
+                    let line_lower = line.to_lowercase();
+                    
+                    if line_lower.contains("mohistmc") || line_lower.contains("mohist") {
+                        scores.mohist += 5;
+                        println!("🔍 [Détection] Logs contiennent 'mohist' → +5 Mohist");
+                        break; // Une seule mention suffit
+                    }
+                    if line_lower.contains("magma") {
+                        scores.mohist += 4;
+                        break;
+                    }
+                    if line_lower.contains("neoforge") {
+                        scores.neoforge += 5;
+                        break;
+                    }
+                    if line_lower.contains("paper") {
+                        scores.paper += 5;
+                        break;
+                    }
+                    if line_lower.contains("spigot") {
+                        scores.paper += 4;
+                        break;
+                    }
+                    if line_lower.contains("forge") && !line_lower.contains("neoforge") && !line_lower.contains("mohist") {
+                        scores.forge += 5;
+                        break;
+                    }
+                }
+                line_count += 1;
+            }
+        }
+    }
+    
+    // ========== MÉTHODE 5: Fichiers de configuration spécifiques ==========
+    // Paper/Spigot
+    if path.join("paper.yml").exists() {
+        scores.paper += 7;
+        println!("🔍 [Détection] paper.yml trouvé → +7 Paper");
+    }
+    if path.join("spigot.yml").exists() {
+        scores.paper += 6;
+        println!("🔍 [Détection] spigot.yml trouvé → +6 Paper");
+    }
+    if path.join("bukkit.yml").exists() {
+        scores.paper += 5;
+        println!("🔍 [Détection] bukkit.yml trouvé → +5 Paper");
+    }
+    if path.join("paper.jar").exists() {
+        scores.paper += 9;
+        println!("🔍 [Détection] paper.jar trouvé → +9 Paper");
+    }
+    if path.join("spigot.jar").exists() {
+        scores.paper += 8;
+        println!("🔍 [Détection] spigot.jar trouvé → +8 Paper");
+    }
+    
+    // Forge/NeoForge
+    if config_path.exists() {
+        if config_path.join("neoforge.toml").exists() || config_path.join("neoforge-client.toml").exists() {
+            scores.neoforge += 7;
+            println!("🔍 [Détection] neoforge.toml trouvé → +7 NeoForge");
+        }
+        if config_path.join("forge-client.toml").exists() || config_path.join("forge-server.toml").exists() {
+            scores.forge += 7;
+            println!("🔍 [Détection] forge-*.toml trouvé → +7 Forge");
+        }
+    }
+    
+    // ========== MÉTHODE 6: Analyse des métadonnées JAR (MANIFEST.MF) ==========
+    for jar_file in &jar_files {
+        let jar_path = jar_file.path();
+        if let Ok(zip_file) = std::fs::File::open(&jar_path) {
+            use zip::ZipArchive;
+            if let Ok(mut archive) = ZipArchive::new(zip_file) {
+                if let Ok(mut manifest_file) = archive.by_name("META-INF/MANIFEST.MF") {
+                    let mut manifest_content = String::new();
+                    use std::io::Read;
+                    if let Ok(_) = manifest_file.read_to_string(&mut manifest_content) {
+                        let manifest_lower = manifest_content.to_lowercase();
+                        
+                        if manifest_lower.contains("mohist") {
+                            scores.mohist += 8;
+                            println!("🔍 [Détection] MANIFEST.MF contient 'mohist' → +8 Mohist");
+                        }
+                        if manifest_lower.contains("neoforge") {
+                            scores.neoforge += 8;
+                            println!("🔍 [Détection] MANIFEST.MF contient 'neoforge' → +8 NeoForge");
+                        }
+                        if manifest_lower.contains("forge") && !manifest_lower.contains("neoforge") && !manifest_lower.contains("mohist") {
+                            scores.forge += 8;
+                            println!("🔍 [Détection] MANIFEST.MF contient 'forge' → +8 Forge");
+                        }
+                        if manifest_lower.contains("paper") {
+                            scores.paper += 8;
+                            println!("🔍 [Détection] MANIFEST.MF contient 'paper' → +8 Paper");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // ========== MÉTHODE 7: Analyse du dossier libraries/ ==========
+    let libraries_path = path.join("libraries");
+    if libraries_path.exists() {
+        if let Ok(entries) = fs::read_dir(&libraries_path) {
+            for entry in entries.filter_map(|e| e.ok()).take(100) { // Limiter à 100 entrées
+                let entry_path = entry.path();
+                let path_str = entry_path.to_string_lossy().to_lowercase();
+                
+                if path_str.contains("com/mohistmc") {
+                    scores.mohist += 6;
+                    println!("🔍 [Détection] libraries/ contient 'com/mohistmc' → +6 Mohist");
+                    break;
+                }
+                if path_str.contains("net/neoforged") {
+                    scores.neoforge += 6;
+                    println!("🔍 [Détection] libraries/ contient 'net/neoforged' → +6 NeoForge");
+                    break;
+                }
+                if path_str.contains("net/minecraftforge") || path_str.contains("org/spongepowered/forge") {
+                    scores.forge += 6;
+                    println!("🔍 [Détection] libraries/ contient 'forge' → +6 Forge");
+                    break;
+                }
+                if path_str.contains("io/papermc") {
+                    scores.paper += 6;
+                    println!("🔍 [Détection] libraries/ contient 'io/papermc' → +6 Paper");
+                    break;
+                }
+            }
+        }
+    }
+    
+    // ========== MÉTHODE 8: Analyse de version.json ==========
+    let version_file = path.join("version.json");
+    if version_file.exists() {
+        if let Ok(content) = fs::read_to_string(&version_file) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(id) = json["id"].as_str() {
+                    let id_lower = id.to_lowercase();
+                    if id_lower.contains("mohist") {
+                        scores.mohist += 7;
+                        println!("🔍 [Détection] version.json id contient 'mohist' → +7 Mohist");
+                    }
+                    if id_lower.contains("neoforge") {
+                        scores.neoforge += 7;
+                        println!("🔍 [Détection] version.json id contient 'neoforge' → +7 NeoForge");
+                    }
+                    if id_lower.contains("forge") && !id_lower.contains("neoforge") {
+                        scores.forge += 7;
+                        println!("🔍 [Détection] version.json id contient 'forge' → +7 Forge");
+                    }
+                }
+                if let Some(server_type) = json["type"].as_str() {
+                    let type_lower = server_type.to_lowercase();
+                    if type_lower == "forge" {
+                        scores.forge += 6;
+                        println!("🔍 [Détection] version.json type = 'forge' → +6 Forge");
+                    }
+                    if type_lower == "neoforge" {
+                        scores.neoforge += 6;
+                        println!("🔍 [Détection] version.json type = 'neoforge' → +6 NeoForge");
+                    }
+                }
+            }
+        }
+    }
+    
+    // ========== MÉTHODE 9: Structure des dossiers ==========
+    // Paper/Spigot: plugins sans mods
+    if has_plugins && !has_mods {
+        scores.paper += 6;
+        println!("🔍 [Détection] plugins/ sans mods/ → +6 Paper");
+    }
+    
+    // Forge/NeoForge/Mohist: mods sans plugins (ou avec)
+    if has_mods {
+        // Vérifier dans le dossier mods pour des indices
+        let mut found_neoforge = false;
+        let mut found_forge = false;
+        let mut found_mohist = false;
+        
+        if let Ok(entries) = fs::read_dir(path.join("mods")) {
+            for entry in entries.filter_map(|e| e.ok()).take(50) { // Limiter à 50 mods
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                if name.contains("neoforge") {
+                    found_neoforge = true;
+                    scores.neoforge += 5;
+                    println!("🔍 [Détection] mods/ contient 'neoforge' → +5 NeoForge");
+                    break;
+                } else if name.contains("mohist") {
+                    found_mohist = true;
+                    scores.mohist += 5;
+                    println!("🔍 [Détection] mods/ contient 'mohist' → +5 Mohist");
+                    break;
+                } else if name.contains("forge") && !name.contains("neoforge") {
+                    found_forge = true;
+                    scores.forge += 4;
+                }
+            }
+        }
+        
+        // Si mods présents mais pas d'indices spécifiques
+        if !found_neoforge && !found_mohist && !found_forge {
+            scores.forge += 3; // Par défaut si mods présents
+            println!("🔍 [Détection] mods/ présent sans indices → +3 Forge (défaut)");
+        }
+    }
+    
+    // ========== MÉTHODE 10: Cache de détection (.nether-type) ==========
+    let cache_file = path.join(".nether-type");
+    if cache_file.exists() {
+        if let Ok(cached_type) = fs::read_to_string(&cache_file) {
+            let cached_type = cached_type.trim().to_lowercase();
+            match cached_type.as_str() {
+                "mohist" => scores.mohist += 5,
+                "neoforge" => scores.neoforge += 5,
+                "forge" => scores.forge += 5,
+                "paper" => scores.paper += 5,
+                _ => {}
+            }
+            println!("🔍 [Détection] Cache .nether-type trouvé: {} → +5", cached_type);
+        }
+    }
+    
+    // Déterminer le type final avec le meilleur score
+    let detected_type = scores.get_best_type();
+    
+    // Sauvegarder dans le cache si on a une détection fiable (score >= 5)
+    let final_score = match detected_type.as_str() {
+        "mohist" => scores.mohist,
+        "neoforge" => scores.neoforge,
+        "forge" => scores.forge,
+        "paper" => scores.paper,
+        _ => scores.vanilla,
+    };
+    
+    if final_score >= 5 && detected_type != "vanilla" {
+        if let Err(e) = fs::write(&cache_file, &detected_type) {
+            println!("⚠️ Erreur écriture cache .nether-type: {}", e);
+        } else {
+            println!("💾 [Détection] Cache sauvegardé: {} (score: {})", detected_type, final_score);
+        }
+    }
+    
+    println!("📊 [Détection] Scores finaux - Vanilla: {}, Paper: {}, Forge: {}, NeoForge: {}, Mohist: {}", 
+        scores.vanilla, scores.paper, scores.forge, scores.neoforge, scores.mohist);
+    println!("✅ [Détection] Type détecté: {} (score: {})", detected_type, final_score);
+    
+    detected_type
+}
+
 // Scanner le dossier des serveurs pour détecter les serveurs importés manuellement
 #[tauri::command]
 async fn scan_servers_directory() -> Result<Vec<serde_json::Value>, String> {
@@ -4495,7 +6145,6 @@ async fn scan_servers_directory() -> Result<Vec<serde_json::Value>, String> {
             if properties_file.exists() {
                 // Lire les propriétés de base
                 let mut port = 25565;
-                let mut server_type = "vanilla".to_string();
                 
                 if let Ok(content) = fs::read_to_string(&properties_file) {
                     for line in content.lines() {
@@ -4509,48 +6158,27 @@ async fn scan_servers_directory() -> Result<Vec<serde_json::Value>, String> {
                     }
                 }
                 
-                // Détecter le type de serveur
-                // Vérifier d'abord Paper/Spigot (détection par fichiers de configuration)
-                if path.join("paper.jar").exists() || path.join("spigot.jar").exists() || 
-                   path.join("bukkit.yml").exists() || path.join("spigot.yml").exists() ||
-                   (path.join("plugins").exists() && !path.join("mods").exists()) {
-                    server_type = "paper".to_string();
-                }
-                // Vérifier ensuite les mods
-                else if path.join("mods").exists() {
-                    let mut found_neoforge = false;
-                    let mut found_forge = false;
-                    let mut found_mohist = false;
-                    
-                    if let Ok(entries) = fs::read_dir(path.join("mods")) {
-                        for entry in entries.filter_map(|e| e.ok()) {
-                            let name = entry.file_name().to_string_lossy().to_lowercase();
-                            if name.contains("neoforge") {
-                                found_neoforge = true;
-                                break;
-                            } else if name.contains("mohist") {
-                                found_mohist = true;
-                                break;
-                            } else if name.contains("forge") {
-                                found_forge = true;
-                            }
-                        }
-                    }
-                    
-                    if found_neoforge {
-                        server_type = "neoforge".to_string();
-                    } else if found_mohist {
-                        server_type = "mohist".to_string();
-                    } else if found_forge {
-                        server_type = "forge".to_string();
-                    } else {
-                        server_type = "forge".to_string(); // Par défaut si mods présents
-                    }
-                }
+                // Détecter le type de serveur avec la fonction avancée
+                let server_type = detect_server_type_advanced(&path);
                 
                 // Utiliser la fonction robuste de détection pour tous les serveurs
                 let detected_version = detect_version_internal(&path);
                 let final_version = if detected_version.is_empty() { "Unknown".to_string() } else { detected_version };
+                
+                // Corriger automatiquement la configuration réseau si nécessaire
+                let properties_file = path.join("server.properties");
+                if let Err(e) = fix_server_network_auto(&properties_file) {
+                    println!("⚠️ Erreur lors de la correction réseau pour {}: {}", server_name, e);
+                    // Continuer quand même
+                }
+                
+                // Configurer automatiquement le serveur (créer/corriger start.bat si nécessaire)
+                // Utiliser une RAM par défaut de 2048 MB
+                let default_ram = 2048;
+                if let Err(e) = auto_configure_server(&path, &server_name, default_ram).await {
+                    println!("⚠️ Erreur lors de la configuration automatique pour {}: {}", server_name, e);
+                    // Continuer quand même, le serveur sera quand même détecté
+                }
                 
                 detected_servers.push(serde_json::json!({
                     "name": server_name,
@@ -4586,6 +6214,20 @@ async fn detect_server_version(server_path: String) -> Result<String, String> {
     
     println!("✅ Version détectée: {} pour {}", version, server_path);
     Ok(version)
+}
+
+// Commande publique pour configurer automatiquement un serveur
+#[tauri::command]
+async fn auto_configure_server_command(server_path: String, server_name: String, ram_mb: u32) -> Result<(), String> {
+    use std::path::PathBuf;
+    
+    let path = PathBuf::from(&server_path);
+    
+    if !path.exists() {
+        return Err("Le chemin du serveur n'existe pas".to_string());
+    }
+    
+    auto_configure_server(&path, &server_name, ram_mb).await
 }
 
 // ========== GESTION DES JOUEURS (MODERATION) ==========
@@ -5089,6 +6731,7 @@ fn main() {
             stop_server,
             get_server_status,
             update_server_properties,
+            update_server_ram,
             check_java_version,
             detect_java_versions,
             get_recommended_java_version,
@@ -5155,7 +6798,8 @@ fn main() {
             unban_player,
             kick_player,
             set_player_op,
-            set_player_whitelist
+            set_player_whitelist,
+            auto_configure_server_command
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
