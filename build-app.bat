@@ -64,6 +64,21 @@ echo ========================================
 echo    ✓ COMPILATION RÉUSSIE !
 echo ========================================
 echo.
+
+REM Exécuter le script PowerShell pour modifier le fichier NSIS
+echo [INFO] Modification du script de désinstallation...
+echo [INFO] Ajout de la suppression automatique du dossier NetherClient...
+cd src-tauri
+powershell -ExecutionPolicy Bypass -File scripts/post-build-nsis.ps1
+if errorlevel 1 (
+    echo [AVERTISSEMENT] Le script PowerShell a rencontré une erreur, mais la compilation est réussie
+    echo [INFO] Le désinstalleur fonctionnera, mais la suppression automatique du dossier NetherClient pourrait ne pas être active
+) else (
+    echo [OK] Script de désinstallation modifié avec succès
+)
+cd ..
+
+echo.
 echo ✓ Le setup.exe a été créé avec succès !
 echo.
 echo 📦 Emplacement du fichier :
